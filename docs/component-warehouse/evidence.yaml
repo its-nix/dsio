@@ -72,6 +72,12 @@ dsio.experimental.data.samples:stored_samples:
 dsio.experimental.data.windows:WindowDataset:
   legacy: true
   uses: []
+dsio.experimental.data.windows:WindowItems:
+  approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
+  uses:
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.eval.ess:autocorrelation:
   legacy: true
   uses: []
@@ -253,6 +259,21 @@ dsio.experimental.training:log_calibration:
     kind: real
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/59/runs/d471559820e94a3ba6e0df666c91a05d
+dsio.experimental.data.fitting:fit_class_weights:
+  approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
+  uses:
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
+dsio.experimental.data.fitting:fit_group_weights:
+  approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
+  uses:
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.data.fitting:fit_standardization:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -261,6 +282,12 @@ dsio.experimental.data.fitting:fit_standardization:
     kind: real
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/60/runs/6c37805abd37412f99859815517ce85d
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.data.fitting:record_fitted:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -269,6 +296,12 @@ dsio.experimental.data.fitting:record_fitted:
     kind: real
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/60/runs/6c37805abd37412f99859815517ce85d
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.model.standardization:Standardize:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -348,6 +381,12 @@ dsio.experimental.model.compositions:Stages:
     kind: real
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.model.convolution:DenseConv1d:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -378,6 +417,9 @@ dsio.experimental.model.layout:TimeMajorToChannelFirst:
   - consumer: reference_projects/self_supervised
     test: tests/reference_flows/test_self_supervised_flow.py
     kind: fixture
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.model.standardization:InstanceStandardize:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -386,6 +428,9 @@ dsio.experimental.model.standardization:InstanceStandardize:
     kind: real
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.model.objectives:SupervisedObjective:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -418,6 +463,12 @@ dsio.experimental.model.objectives:SupervisedObjective:
   - consumer: reference_projects/supervised
     test: tests/reference_flows/test_supervised_flow.py
     kind: fixture
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.model.tokens:EmbeddingEncoder:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -506,6 +557,12 @@ dsio.experimental.inference.outputs.multiclass:MulticlassOutput:
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/e8277e41ca3a4957b1b74c968234383b
     - https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/71a7cb3803674fb9986fda1928b597e6
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
 dsio.experimental.inference.outputs.multiclass:MulticlassValidator:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -522,6 +579,14 @@ dsio.experimental.inference.outputs.multiclass:MulticlassValidator:
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/e8277e41ca3a4957b1b74c968234383b
     - https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/71a7cb3803674fb9986fda1928b597e6
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+    via: dsio.experimental.inference.outputs.multiclass:MulticlassOutput
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
+    via: dsio.experimental.inference.outputs.multiclass:MulticlassOutput
 dsio.experimental.inference.outputs.regression:RegressionOutput:
   approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
   uses:
@@ -593,6 +658,9 @@ dsio.experimental.data.arrays:collate_arrays:
     kind: real
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/53/runs/990bcbd49b1147d0a04ecf0af98459e9
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
   - consumer: reference_projects/kaggle/essay_scoring
     test: tests/kaggle_portfolio/test_essay_scoring.py
     kind: real
@@ -632,3 +700,36 @@ dsio.experimental.data.padding:PadCollator:
     kind: real
     runs:
     - https://pop.tailee691f.ts.net:8443/#/experiments/56/runs/69a9ad9f8c6948829f938654b6d8c9a1
+dsio.experimental.model.fusion:MultimodalFusion:
+  approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
+  uses:
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
+dsio.experimental.model.convolution:PooledConv1d:
+  approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
+  uses:
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
+dsio.experimental.model.standardization:PackedObservedStandardize:
+  approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
+  uses:
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real
+dsio.experimental.model.objectives:ClassIndexAccuracy:
+  approval: owner standing approval for Component Warehouse v1 experimental entries (Epics 7-9), 2026-10-01
+  uses:
+  - consumer: reference_projects/kaggle/child_mind
+    test: tests/kaggle_portfolio/test_child_mind.py
+    kind: real
+  - consumer: reference_projects/kaggle/child_mind/sequence
+    test: tests/kaggle_portfolio/test_child_mind_sequence.py
+    kind: real

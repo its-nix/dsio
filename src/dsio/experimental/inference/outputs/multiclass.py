@@ -64,6 +64,8 @@ class MulticlassOutput(nn.Module):
             raise PredictionViolation(
                 "shape", f"logits must be [batch, {self.classes}], got {tuple(logits.shape)}"
             )
+        if logits.shape[0] == 0:
+            raise PredictionViolation("shape", "logits batch must be non-empty")
         _contracts._require_floating(logits, "logits")
         _contracts._finite(logits, "logits")
         if not self.scores:
@@ -117,6 +119,8 @@ class MulticlassValidator:
             raise PredictionViolation(
                 "shape", f"prediction must be [batch], got {tuple(prediction.shape)}"
             )
+        if prediction.shape[0] == 0:
+            raise PredictionViolation("shape", "prediction batch must be non-empty")
         low, high = self.label_offset, self.label_offset + self.classes - 1
         if not bool(((prediction >= low) & (prediction <= high)).all()):
             raise PredictionViolation("range", f"predictions must be in [{low}, {high}]")

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+from reference_projects.kaggle.child_mind.data import (
+    SENSOR_MASK_SLICE,
+    SENSOR_PRESENT_INDEX,
+    SENSOR_VALUE_SLICE,
+    TABULAR_MASK_SLICE,
+    TABULAR_VALUE_SLICE,
+)
 from tests.golden import assert_golden_metrics
 from tests.kaggle_portfolio.assertions import (
     assert_downstream_evidence,
@@ -14,9 +22,47 @@ from tests.kaggle_portfolio.assertions import (
 )
 from tests.replay import assert_same_identities
 
+from dsio.config.components import resolve_component
 from dsio.contracts import sha256_of_bytes
 from dsio.data.loading import DsioDataModule
+from dsio.experimental.inference import MulticlassOutput
+from dsio.experimental.model import Standardize, SupervisedObjective
 from dsio.model.module import DsioModule
+
+
+class _LegacyFlat(torch.nn.Module):
+    def __init__(self, parameters: dict[str, list[float]], hidden: int, use_sensor: bool) -> None:
+        super().__init__()
+        self.tabular_standardize = Standardize(
+            parameters["tabular_center"], parameters["tabular_scale"], observed_only=True
+        )
+        self.sensor_standardize = Standardize(
+            parameters["sensor_center"], parameters["sensor_scale"], observed_only=True
+        )
+        self.use_sensor = use_sensor
+        self.tabular_encoder = torch.nn.Sequential(torch.nn.Linear(116, hidden), torch.nn.ReLU())
+        self.sensor_encoder = torch.nn.Sequential(torch.nn.Linear(122, hidden), torch.nn.ReLU())
+        self.head = torch.nn.Sequential(
+            torch.nn.Linear(hidden * 2 + 1, hidden),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden, 4),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.flatten(1).float()
+        tabular_mask = x[:, TABULAR_MASK_SLICE]
+        sensor_mask = x[:, SENSOR_MASK_SLICE]
+        present = x[:, SENSOR_PRESENT_INDEX : SENSOR_PRESENT_INDEX + 1]
+        tabular = self.tabular_standardize(x[:, TABULAR_VALUE_SLICE], tabular_mask)
+        sensor = self.sensor_standardize(x[:, SENSOR_VALUE_SLICE], sensor_mask)
+        tabular_encoded = self.tabular_encoder(torch.cat((tabular, tabular_mask), 1))
+        sensor_encoded = self.sensor_encoder(torch.cat((sensor, sensor_mask), 1))
+        if self.use_sensor:
+            sensor_encoded = sensor_encoded * present
+        else:
+            sensor_encoded = torch.zeros_like(sensor_encoded)
+            present = torch.zeros_like(present)
+        return self.head(torch.cat((tabular_encoded, sensor_encoded, present), 1))
 
 
 def test_child_mind_boundary_preserves_optional_modalities_and_excludes_leakage(
@@ -224,10 +270,9 @@ def test_child_mind_sensor_summary_rejects_infinite_source_values(
 
 def test_child_mind_fusion_keeps_missing_sensor_explicit_and_ablation_local() -> None:
     from reference_projects.kaggle.child_mind.components import (
-        CmiFusionClassifier,
-        CmiPrediction,
-        ablate_sensor,
-        validate_cmi_prediction,
+        OUTPUT,
+        model_config,
+        model_runtime_parameters,
     )
     from reference_projects.kaggle.child_mind.data import (
         PACKED_FEATURES,
@@ -246,56 +291,92 @@ def test_child_mind_fusion_keeps_missing_sensor_explicit_and_ablation_local() ->
     batch[0, 0, SENSOR_PRESENT_INDEX] = 1
     batch[1, 0, SENSOR_VALUE_SLICE] = 999
 
-    model = CmiFusionClassifier(
-        tabular_center=[0.0] * TABULAR_FEATURES,
-        tabular_scale=[1.0] * TABULAR_FEATURES,
-        sensor_center=[0.0] * SENSOR_FEATURES,
-        sensor_scale=[1.0] * SENSOR_FEATURES,
-        use_sensor=True,
-        hidden=8,
+    parameters = {
+        "tabular_center": [0.0] * TABULAR_FEATURES,
+        "tabular_scale": [1.0] * TABULAR_FEATURES,
+        "sensor_center": [0.0] * SENSOR_FEATURES,
+        "sensor_scale": [1.0] * SENSOR_FEATURES,
+    }
+    torch.manual_seed(41)
+    model = _LegacyFlat(parameters, hidden=8, use_sensor=True)
+
+    torch.manual_seed(41)
+    composed = resolve_component(
+        model_config(hidden=8), **model_runtime_parameters(**parameters), expected=torch.nn.Module
     )
+    for expected, actual in zip(model.parameters(), composed.parameters(), strict=True):
+        assert expected.shape == actual.shape
+        assert torch.equal(expected, actual)
     logits = model(batch)
-    outputs = CmiPrediction()(logits)
-    validate_cmi_prediction(outputs)
+    assert torch.equal(composed(batch), logits)
+    assert torch.equal(composed(batch.double()), model(batch.double()))
+    assert torch.equal(composed(batch[:, 0]), logits)
+    with pytest.raises(ValueError, match="fusion input"):
+        composed(batch.transpose(1, 2))
+    output = resolve_component(OUTPUT, expected=MulticlassOutput)
+    outputs = output(logits)
+    output.validator(outputs)
     assert logits.shape == (2, 4)
     assert outputs["prediction"].shape == (2,)
     assert outputs["probability"].shape == (2, 4)
 
-    ablated = ablate_sensor(batch)
-    assert torch.equal(
-        ablated[..., : SENSOR_VALUE_SLICE.start],
-        batch[..., : SENSOR_VALUE_SLICE.start],
-    )
-    assert ablated[..., SENSOR_VALUE_SLICE].eq(0).all()
-    assert ablated[..., SENSOR_MASK_SLICE].eq(0).all()
-    assert ablated[..., SENSOR_PRESENT_INDEX].eq(0).all()
+    ablated = batch.clone()
+    ablated[..., SENSOR_VALUE_SLICE.start : SENSOR_PRESENT_INDEX + 1] = 0
 
-    tabular_only = CmiFusionClassifier(
-        tabular_center=[0.0] * TABULAR_FEATURES,
-        tabular_scale=[1.0] * TABULAR_FEATURES,
-        sensor_center=[0.0] * SENSOR_FEATURES,
-        sensor_scale=[1.0] * SENSOR_FEATURES,
-        use_sensor=False,
-        hidden=8,
+    torch.manual_seed(73)
+    tabular_only = _LegacyFlat(parameters, hidden=8, use_sensor=False)
+    torch.manual_seed(73)
+    composed_tabular_only = resolve_component(
+        model_config(hidden=8, use_sensor=False),
+        **model_runtime_parameters(**parameters),
+        expected=torch.nn.Module,
     )
+    assert torch.equal(composed_tabular_only(batch), tabular_only(batch))
     assert torch.equal(tabular_only(batch), tabular_only(ablated))
+    assert torch.equal(composed_tabular_only(batch), composed_tabular_only(ablated))
+    with pytest.raises(ValueError, match="hidden"):
+        model_config(hidden=0)
+
+
+def test_child_mind_objective_matches_native_weighted_loss_and_accuracy() -> None:
+    from reference_projects.kaggle.child_mind.components import OBJECTIVE
+
+    logits = torch.tensor([[3.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]])
+    target = torch.tensor([0, 2, 1])
+    class_weights = [0.5, 1.0, 1.5, 2.0]
+    objective = resolve_component(
+        OBJECTIVE,
+        loss_parameters={"weight": class_weights},
+        expected=SupervisedObjective,
+    )
+
+    values = objective(torch.nn.Identity(), {"x": logits, "y": target}, "train")
+    expected_loss = torch.nn.functional.cross_entropy(
+        logits, target, weight=torch.tensor(class_weights)
+    )
+    expected_accuracy = logits.argmax(dim=1).eq(target).float().mean()
+    assert torch.equal(values["loss"], expected_loss)
+    assert torch.equal(values["accuracy"], expected_accuracy)
 
 
 def test_child_mind_fusion_ignores_masked_nonfinite_values_but_rejects_observed_ones() -> None:
-    from reference_projects.kaggle.child_mind.components import CmiFusionClassifier
+    from reference_projects.kaggle.child_mind.components import (
+        model_config,
+        model_runtime_parameters,
+    )
     from reference_projects.kaggle.child_mind.data import (
         PACKED_FEATURES,
         SENSOR_VALUE_SLICE,
         TABULAR_FEATURES,
     )
 
-    model = CmiFusionClassifier(
+    runtime = model_runtime_parameters(
         tabular_center=[0.0] * TABULAR_FEATURES,
         tabular_scale=[1.0] * TABULAR_FEATURES,
         sensor_center=[0.0] * (SENSOR_VALUE_SLICE.stop - SENSOR_VALUE_SLICE.start),
         sensor_scale=[1.0] * (SENSOR_VALUE_SLICE.stop - SENSOR_VALUE_SLICE.start),
-        hidden=8,
     )
+    model = resolve_component(model_config(hidden=8), **runtime, expected=torch.nn.Module)
     clean = torch.zeros(1, 1, PACKED_FEATURES)
     masked = clean.clone()
     masked[0, 0, 0] = torch.nan
@@ -305,7 +386,7 @@ def test_child_mind_fusion_ignores_masked_nonfinite_values_but_rejects_observed_
 
     observed = masked.clone()
     observed[0, 0, TABULAR_FEATURES] = 1
-    with pytest.raises(ValueError, match="observed tabular.*finite"):
+    with pytest.raises(RuntimeError, match="observed values must be finite"):
         model(observed)
 
 
@@ -313,11 +394,11 @@ def test_child_mind_fusion_ignores_masked_nonfinite_values_but_rejects_observed_
     ("prediction", "probability", "message"),
     [
         (torch.empty(0, dtype=torch.long), torch.empty(0, 4), "non-empty"),
-        (torch.tensor([1.0]), torch.tensor([[0.0, 1.0, 0.0, 0.0]]), "integer"),
+        (torch.tensor([1.0]), torch.tensor([[0.0, 1.0, 0.0, 0.0]]), "dtype"),
         (
             torch.tensor([1]),
             torch.tensor([[-0.1, 1.1, 0.0, 0.0]]),
-            r"\[0, 1\]",
+            "simplex",
         ),
     ],
 )
@@ -326,10 +407,12 @@ def test_child_mind_prediction_validation_rejects_invalid_output_values(
     probability: torch.Tensor,
     message: str,
 ) -> None:
-    from reference_projects.kaggle.child_mind.components import validate_cmi_prediction
+    from reference_projects.kaggle.child_mind.components import OUTPUT
 
     with pytest.raises(ValueError, match=message):
-        validate_cmi_prediction({"prediction": prediction, "probability": probability})
+        resolve_component(OUTPUT, expected=MulticlassOutput).validator(
+            {"prediction": prediction, "probability": probability}
+        )
 
 
 def test_child_mind_flow_trains_tabular_and_fused_models_with_replayable_evidence(
@@ -391,6 +474,9 @@ def test_child_mind_flow_trains_tabular_and_fused_models_with_replayable_evidenc
             "qwk.sensor_ablation_delta",
         }
         assert all(np.isfinite(value) for value in model["metrics"].values())
+        training = MlflowClient().get_run(model["train_run_id"])
+        assert 0.0 <= training.data.metrics["train/accuracy"] <= 1.0
+        assert 0.0 <= training.data.metrics["val/accuracy"] <= 1.0
         assert model["ablation_sample_ids"] == model["sensor_present_sample_ids"]
         assert model["submission_digest"] == sha256_of_bytes(model["submission_bytes"])
         lines = model["submission_bytes"].decode().splitlines()
@@ -402,6 +488,19 @@ def test_child_mind_flow_trains_tabular_and_fused_models_with_replayable_evidenc
         evaluation = MlflowClient().get_run(model["evaluation_run_id"])
         for name, value in model["metrics"].items():
             assert evaluation.data.metrics[name] == pytest.approx(value)
+        prediction_artifact = MlflowClient().download_artifacts(
+            model["evaluation_run_id"],
+            "evaluation/predictions.npz",
+            str(tmp_path / f"{mode}-evaluation"),
+        )
+        with np.load(prediction_artifact) as evidence:
+            assert (
+                evidence["ablation__sensor__sample_id"].tolist()
+                == model["sensor_present_sample_ids"]
+            )
+            assert len(evidence["ablation__sensor__prediction__prediction"]) == len(
+                model["ablation_sample_ids"]
+            )
         assert_execution_evidence(
             model["train_run_id"],
             tmp_path / f"{mode}-provenance",
@@ -410,6 +509,39 @@ def test_child_mind_flow_trains_tabular_and_fused_models_with_replayable_evidenc
             batch_size=16,
             num_workers=0,
         )
+        provenance_path = MlflowClient().download_artifacts(
+            model["train_run_id"], "provenance.json", str(tmp_path / f"{mode}-fitted")
+        )
+        provenance = json.loads(Path(provenance_path).read_text())
+        fitted = provenance["configuration"]["standardization"]
+        assert set(fitted) == {"tabular", "sensor"}
+        for name, expected_features in (("tabular", 58), ("sensor", 61)):
+            evidence = fitted[name]
+            assert evidence["role"] == "train"
+            assert evidence["partition"] == 0
+            assert evidence["observation"] == "mask"
+            assert set(evidence["sample_ids"]) == set(result["assignments"]["train"])
+            assert len(evidence["mean"]) == len(evidence["scale"]) == expected_features
+            artifact = json.loads(
+                Path(
+                    MlflowClient().download_artifacts(model["train_run_id"], evidence["artifact"])
+                ).read_text()
+            )
+            assert artifact == {key: value for key, value in evidence.items() if key != "artifact"}
+        weights = provenance["configuration"]["weights"]
+        assert set(weights) == {"class"}
+        class_weights = weights["class"]
+        assert class_weights["source"] == "sample_attribute"
+        assert class_weights["classes"] == 4
+        assert class_weights["sample_ids"] == class_weights["resolved_sample_ids"]
+        weight_artifact = json.loads(
+            Path(
+                MlflowClient().download_artifacts(model["train_run_id"], class_weights["artifact"])
+            ).read_text()
+        )
+        assert weight_artifact == {
+            key: value for key, value in class_weights.items() if key != "artifact"
+        }
         assert_downstream_evidence(model, tmp_path / f"{mode}-downstream")
 
 

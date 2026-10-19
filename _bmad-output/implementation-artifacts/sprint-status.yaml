@@ -1,5 +1,5 @@
 # generated: 2026-09-21T18:15:08+03:00
-# last_updated: 2026-10-03T23:13:00+03:00
+# last_updated: 2026-10-19
 # project: DSio
 # project_key: NOKEY
 # tracking_system: file-system
@@ -36,7 +36,7 @@
 # - Re-run sprint planning to refresh statuses without downgrading existing progress.
 
 generated: "2026-09-21T18:15:08+03:00"
-last_updated: "2026-10-03T23:13:00+03:00"
+last_updated: "2026-10-19"
 project: DSio
 project_key: NOKEY
 tracking_system: file-system
@@ -109,13 +109,13 @@ development_status:
   8-7-record-sequence-migration-parity: done
   epic-8-retrospective: optional
 
-  epic-9: backlog
-  9-1-map-windows-into-training-items-with-weights-and-groups: backlog
-  9-2-fit-observed-only-statistics-for-missing-data: backlog
-  9-3-balance-training-by-class-and-group: backlog
-  9-4-compose-multimodal-fusion-with-modality-presence-gating: backlog
-  9-5-evaluate-subgroups-and-modality-ablation: backlog
-  9-6-record-multimodal-migration-parity: backlog
+  epic-9: in-progress
+  9-1-map-windows-into-training-items-with-weights-and-groups: done
+  9-2-fit-observed-only-statistics-for-missing-data: done
+  9-3-balance-training-by-class-and-group: done
+  9-4-compose-multimodal-fusion-with-modality-presence-gating: done
+  9-5-evaluate-subgroups-and-modality-ablation: done
+  9-6-record-multimodal-migration-parity: ready-for-dev
   epic-9-retrospective: optional
 
   epic-10: backlog

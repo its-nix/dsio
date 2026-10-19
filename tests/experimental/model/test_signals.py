@@ -12,8 +12,140 @@ from dsio.experimental.model import (
     ChannelFirstToTimeMajor,
     DenseConv1d,
     InstanceStandardize,
+    PackedObservedStandardize,
+    PooledConv1d,
+    Standardize,
     TimeMajorToChannelFirst,
 )
+
+
+def test_fixed_standardization_selects_observed_values_before_arithmetic() -> None:
+    stage = Standardize([1.0, 10.0], [2.0, 5.0], observed_only=True)
+    values = torch.tensor([[3.0, float("nan")], [float("inf"), 20.0]])
+    observed = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+
+    assert torch.equal(stage(values, observed), torch.tensor([[1.0, 0.0], [0.0, 2.0]]))
+    with pytest.raises(RuntimeError, match="observed values must be finite"):
+        stage(values, torch.ones_like(observed))
+    with pytest.raises(RuntimeError, match="zero or one"):
+        stage(torch.ones(1, 2), torch.tensor([[1.0, 0.5]]))
+    with pytest.raises(ValueError, match="requires an observed mask"):
+        stage(torch.ones(1, 2))
+    with pytest.raises(ValueError, match="mask shape"):
+        stage(torch.ones(1, 2), torch.ones(2))
+
+
+def test_fixed_observed_standardization_supports_axis_device_state_and_compile() -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    stage = Standardize([1.0, 2.0], [2.0, 4.0], axis=1, observed_only=True).to(device)
+    source = torch.tensor([[[3.0, 5.0], [6.0, 10.0]]], device=device)
+    observed = torch.tensor([[[1.0, 0.0], [1.0, 1.0]]], device=device)
+    expected = torch.tensor([[[1.0, 0.0], [1.0, 2.0]]], device=device)
+
+    assert torch.equal(stage(source, observed), expected)
+    assert set(stage.state_dict()) == {"mean", "scale"}
+    compiled = torch.compile(stage, backend="eager", fullgraph=True)
+    assert torch.equal(compiled(source, observed), expected)
+
+    resolved = resolve_component(
+        {
+            "reference": "dsio.experimental.model.standardization:Standardize",
+            "parameters": {
+                "mean": [1.0, 2.0],
+                "scale": [2.0, 4.0],
+                "axis": 1,
+                "observed_only": True,
+            },
+        },
+        expected=nn.Module,
+    ).to(device)
+    assert torch.equal(resolved(source, observed), expected)
+
+
+def test_standardization_rejects_unrepresentable_buffers_and_overflow() -> None:
+    with pytest.raises(ValueError, match="representable as finite float32"):
+        Standardize([1e100], [1.0])
+    with pytest.raises(ValueError, match="remain non-zero"):
+        Standardize([0.0], [1e-100])
+
+    source = torch.tensor([[[3e38, -3e38]]])
+    with pytest.raises(RuntimeError, match="statistics must be finite"):
+        InstanceStandardize(nan_policy="omit")(source)
+    with pytest.raises(ValueError, match="statistics must be finite"):
+        InstanceStandardize(nan_policy="omit", reduction="numpy")(source)
+
+
+def test_packed_observed_standardize_matches_the_two_argument_stage() -> None:
+    packed = torch.tensor([[3.0, float("nan"), 1.0, 0.0]])
+    stage = PackedObservedStandardize(mean=[1.0, 2.0], scale=[2.0, 4.0])
+    expected = Standardize([1.0, 2.0], [2.0, 4.0], observed_only=True)(packed[:, :2], packed[:, 2:])
+    assert torch.equal(stage(packed), torch.cat((expected, packed[:, 2:]), dim=1))
+    assert stage(packed.double()).dtype == torch.float32
+    with pytest.raises(ValueError, match="rank 2"):
+        stage(packed.unsqueeze(0))
+
+
+def test_instance_standardize_can_emit_feature_specific_observation_channels() -> None:
+    x = torch.tensor([[[1.0, 3.0], [float("nan"), 5.0]]])
+    result = InstanceStandardize(nan_policy="omit", emit_observed=True)(x)
+    assert result.shape == (1, 4, 2)
+    assert torch.equal(result[:, 2:], torch.isfinite(x).to(x.dtype))
+    assert torch.equal(result[:, :2], InstanceStandardize(nan_policy="omit")(x))
+
+
+def test_pooled_conv1d_reproduces_the_declared_seeded_stack_exactly() -> None:
+    torch.manual_seed(23)
+    expected = nn.Sequential(
+        nn.Conv1d(16, 32, kernel_size=9, stride=4, padding=4),
+        nn.GELU(),
+        nn.Conv1d(32, 32, kernel_size=9, stride=4, padding=4),
+        nn.GELU(),
+    )
+    torch.manual_seed(23)
+    actual = PooledConv1d(
+        channels=16,
+        hidden=32,
+        depth=2,
+        kernel_size=9,
+        stride=4,
+        padding=4,
+        activation="gelu",
+    )
+    x = torch.randn(3, 16, 64)
+    for left, right in zip(expected.parameters(), actual.parameters(), strict=True):
+        assert torch.equal(left, right)
+    assert torch.equal(actual(x), expected(x).mean(dim=2))
+
+
+def test_pooled_conv1d_validates_configuration_and_signal_shape() -> None:
+    with pytest.raises(ValueError, match="depth"):
+        PooledConv1d(channels=2, hidden=3, depth=0)
+    with pytest.raises(ValueError, match="activation"):
+        PooledConv1d(channels=2, hidden=3, activation="swish")
+    model = PooledConv1d(channels=2, hidden=3)
+    with pytest.raises(ValueError, match="rank 3"):
+        model(torch.ones(4, 2))
+    with pytest.raises(ValueError, match="channel axis 1 expected 2"):
+        model(torch.ones(4, 3, 8))
+    short = PooledConv1d(channels=2, hidden=3, depth=2, kernel_size=9, padding=0)
+    with pytest.raises(ValueError, match="time axis 2.*convolution stage 1"):
+        short(torch.ones(4, 2, 9))
+
+
+def test_instance_standardization_omits_feature_specific_nonfinite_values() -> None:
+    source = torch.tensor(
+        [[[1.0, 3.0, float("nan")], [2.0, float("nan"), 6.0], [float("nan")] * 3]]
+    )
+    expected = torch.tensor([[[-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 0.0]]])
+
+    assert torch.equal(InstanceStandardize(nan_policy="omit")(source), expected)
+    assert torch.equal(InstanceStandardize(nan_policy="omit", reduction="numpy")(source), expected)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        InstanceStandardize(observed_channel=1, nan_policy="omit")
+    with pytest.raises(ValueError, match="channel axis 1 must be non-empty"):
+        InstanceStandardize(nan_policy="omit")(torch.empty(2, 0, 3))
+    with pytest.raises(ValueError, match="time axis 2 must be non-empty"):
+        InstanceStandardize(nan_policy="omit")(torch.empty(2, 3, 0))
 
 
 def test_layout_adapters_round_trip_non_square_contiguous_signals() -> None:
@@ -172,6 +304,17 @@ def test_instance_standardization_is_fullgraph_compilable() -> None:
     source = torch.tensor([[[1.0, 3.0, 0.0], [1.0, 1.0, 0.0]]])
     assert torch.equal(compiled(source), InstanceStandardize(observed_channel=1)(source))
 
+    finite_compiled = torch.compile(
+        InstanceStandardize(nan_policy="omit"),
+        backend="eager",
+        fullgraph=True,
+    )
+    finite_source = torch.tensor([[[1.0, 3.0, float("nan")], [float("nan")] * 3]])
+    assert torch.equal(
+        finite_compiled(finite_source),
+        InstanceStandardize(nan_policy="omit")(finite_source),
+    )
+
 
 @pytest.mark.parametrize("reduction", ["torch", "numpy"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
@@ -241,6 +384,15 @@ def test_signal_blocks_resolve_as_canonical_components() -> None:
     model = resolve_component(config, expected=nn.Module)
     x = torch.tensor([[[1.0, 2.0, 3.0, 1.0], [2.0, 4.0, 6.0, 1.0], [0.0, 0.0, 0.0, 0.0]]])
     assert model(x).shape == (1, 3, 2)
+
+    finite = resolve_component(
+        {
+            "reference": "dsio.experimental.model.standardization:InstanceStandardize",
+            "parameters": {"nan_policy": "omit"},
+        },
+        expected=nn.Module,
+    )
+    assert torch.equal(finite(torch.full((1, 1, 2), float("nan"))), torch.zeros(1, 1, 2))
 
 
 @pytest.mark.parametrize("time", [1, 4, 11])

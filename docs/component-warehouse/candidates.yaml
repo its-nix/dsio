@@ -2,15 +2,6 @@
 # Rendered into catalog.md by tools/catalog.py. Each entry shrinks as its story lands;
 # `reason` names the cohort block (#n in the spec) and story, or why it stays local.
 
-Window Dataset class:
-  consumers:
-    - reference_projects/kaggle/child_mind/sequence
-  reason: Window dataset with weights and groups (#2), Story 9.1.
-Local nn.Module models:
-  consumers:
-    - reference_projects/kaggle/child_mind
-    - reference_projects/kaggle/child_mind/sequence
-  reason: Pooled temporal and multimodal models (#10, #15), Story 9.4.
 Verified encoder handoff:
   consumers:
     - reference_projects/kaggle/digit_recognizer
@@ -18,27 +9,6 @@ Verified encoder handoff:
     Loading a pretrained backbone only after its run, identity, digest and label-free lineage
     verify (#17) has one consumer, so it stays local; a DSio load-and-freeze path waits for
     pretrained weights (v2).
-Local objectives:
-  consumers:
-    - reference_projects/kaggle/child_mind
-    - reference_projects/kaggle/child_mind/sequence
-  reason: >-
-    CMI moves to SupervisedObjective (#18) with its weighting stories (9.2-9.4).
-Prediction normalizers and validators:
-  consumers:
-    - reference_projects/kaggle/child_mind
-    - reference_projects/kaggle/child_mind/sequence
-  reason: CMI moves to MulticlassOutput (#25) with its weighting stories (9.2-9.4).
-Evaluation array builders:
-  consumers:
-    - reference_projects/kaggle/child_mind
-  reason: >-
-    collate_arrays (#5) once its dataset is a warehouse block, Stories 9.1-9.4.
-Train-fold statistics and weight fitting:
-  consumers:
-    - reference_projects/kaggle/child_mind
-    - reference_projects/kaggle/child_mind/sequence
-  reason: Observed-only statistics and class/group weights (#4a-#4c), Stories 9.2, 9.3.
 Train and export task wiring:
   consumers:
     - reference_projects/kaggle/titanic
@@ -59,10 +29,12 @@ Well feature engineering:
   consumers:
     - reference_projects/kaggle/rogii
   reason: Stays local - domain feature mapping.
-Streaming evaluation with participant aggregation:
+Streaming evaluation with participant aggregation, subgroup metrics, and modality ablation:
   consumers:
     - reference_projects/kaggle/child_mind/sequence
-  reason: Stays local - bounded-memory streaming evaluation is on the roadmap.
+  reason: >-
+    Stays local - bounded-memory window-to-participant aggregation, subgroup metrics, and
+    modality ablation are deferred with streaming evaluation on the roadmap.
 Labelled-example attribute filter:
   consumers:
     - reference_projects/kaggle/titanic

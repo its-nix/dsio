@@ -15,24 +15,13 @@ from prefect import task
 from dsio.config.components import resolve_component
 from dsio.data.store import SignalStore
 from dsio.eval import evaluate
-from dsio.eval.metrics import quadratic_weighted_kappa
+from dsio.experimental.data import collate_arrays
+from dsio.experimental.inference import MulticlassOutput
 from dsio.inference import build_predictor, log_predictor, predict, require_checkpoint_lineage
 from dsio.tracking import attempt, record_provenance
 from dsio.train.artifacts import ArtifactRef, save_artifact
-from reference_projects.kaggle.child_mind.components import (
-    CmiPrediction,
-    ablate_sensor,
-    validate_cmi_prediction,
-)
-from reference_projects.kaggle.child_mind.data import PACKED_FEATURES, SENSOR_PRESENT_INDEX
-
-
-def _arrays(store_path: str, sample_ids: list[str]) -> dict[str, np.ndarray[Any, Any]]:
-    store = SignalStore(store_path)
-    values = np.zeros((len(sample_ids), 1, PACKED_FEATURES), dtype=np.float32)
-    for index, sample_id in enumerate(sample_ids):
-        values[index] = np.asarray(store.read_sample(sample_id)["data"], dtype=np.float32)
-    return {"sample_id": np.asarray(sample_ids, dtype=np.str_), "x": values}
+from reference_projects.kaggle.child_mind.components import INPUTS, OUTPUT
+from reference_projects.kaggle.child_mind.data import SENSOR_PRESENT_INDEX, SENSOR_VALUE_SLICE
 
 
 @task(persist_result=False)
@@ -52,7 +41,8 @@ def export(
         model = resolve_component(components["model"], expected=torch.nn.Module)
         preprocessor = resolve_component(components["preprocessor"], expected=torch.nn.Module)
         sample_id = next(iter(split["assignments"]["validate"]))
-        inputs = _arrays(data["store_path"], [sample_id])
+        inputs = collate_arrays(INPUTS, SignalStore(data["store_path"]), [sample_id])
+        output = resolve_component(OUTPUT, expected=MulticlassOutput)
         identity = record_provenance(
             run.info.run_id,
             {
@@ -66,10 +56,13 @@ def export(
                 "builder": "dsio.inference.predictor:build_predictor",
                 "model": components["model"],
                 "preprocessor": components["preprocessor"],
-                "normalizer": ("reference_projects.kaggle.child_mind.components:CmiPrediction"),
-                "validator": (
-                    "reference_projects.kaggle.child_mind.components:validate_cmi_prediction"
-                ),
+                "normalizer": OUTPUT,
+                "validator": {
+                    "reference": (
+                        "dsio.experimental.inference.outputs.multiclass:MulticlassValidator"
+                    ),
+                    "parameters": OUTPUT["parameters"],
+                },
             },
         )
         example = {
@@ -80,8 +73,8 @@ def export(
             reference,
             model=model,
             preprocessor=preprocessor,
-            normalizer=CmiPrediction(),
-            validator=validate_cmi_prediction,
+            normalizer=output,
+            validator=output.validator,
             input_example=example,
         )
         info = log_predictor(
@@ -111,7 +104,7 @@ def evaluate_model(
             [int(store.read_sample(value)["attrs"]["target"]) for value in sample_ids],
             dtype=np.int64,
         )
-        inputs = _arrays(data["store_path"], sample_ids)
+        inputs = collate_arrays(INPUTS, store, sample_ids)
         present = inputs["x"][:, 0, SENSOR_PRESENT_INDEX].astype(bool)
         present_ids = inputs["sample_id"][present].tolist()
         missing_ids = inputs["sample_id"][~present].tolist()
@@ -124,17 +117,20 @@ def evaluate_model(
                 "checkpoint_digest": exported["checkpoint_digest"],
                 "export_identity": exported["identity"],
                 "mode": exported["mode"],
-                "metrics": ["accuracy", "quadratic_weighted_kappa"],
+                "metrics": [
+                    "accuracy",
+                    "quadratic_weighted_kappa",
+                    "qwk.sensor_present",
+                    "qwk.sensor_missing",
+                    "qwk.sensor_ablated",
+                    "qwk.sensor_ablation_delta",
+                ],
                 "sample_ids": sample_ids,
                 "sensor_present_sample_ids": present_ids,
                 "sensor_missing_sample_ids": missing_ids,
                 "ablation_sample_ids": present_ids,
             },
-            components={
-                "evaluation": "dsio.eval.execution:evaluate",
-                "qwk": "dsio.eval.metrics:quadratic_weighted_kappa",
-                "ablation": ("reference_projects.kaggle.child_mind.components:ablate_sensor"),
-            },
+            components={"evaluation": "dsio.eval.execution:evaluate"},
         )
         metrics = evaluate(
             run_id=run.info.run_id,
@@ -143,33 +139,18 @@ def evaluate_model(
             inputs=inputs,
             targets=targets,
             metrics=("accuracy", "quadratic_weighted_kappa"),
+            subgroups={"sensor_present": present, "sensor_missing": ~present},
+            subgroup_metrics={"qwk": "quadratic_weighted_kappa"},
+            ablations={
+                "sensor": {
+                    "input_field": "x",
+                    "slice": [SENSOR_VALUE_SLICE.start, SENSOR_PRESENT_INDEX + 1],
+                    "subgroup": "sensor_present",
+                    "fill": 0.0,
+                    "metrics": {"qwk": "quadratic_weighted_kappa"},
+                }
+            },
         )
-        outputs = predict(exported["model_uri"], inputs)
-        predicted = np.asarray(outputs["prediction"], dtype=np.int64)
-        present_qwk = quadratic_weighted_kappa(targets[present], predicted[present])
-        missing_qwk = quadratic_weighted_kappa(targets[~present], predicted[~present])
-        present_inputs = {
-            "sample_id": inputs["sample_id"][present],
-            "x": inputs["x"][present],
-        }
-        ablated_inputs = {
-            "sample_id": present_inputs["sample_id"],
-            "x": ablate_sensor(torch.from_numpy(present_inputs["x"])).numpy(),
-        }
-        ablated = predict(exported["model_uri"], ablated_inputs)
-        ablated_qwk = quadratic_weighted_kappa(
-            targets[present], np.asarray(ablated["prediction"], dtype=np.int64)
-        )
-        extras = {
-            "qwk.sensor_present": present_qwk,
-            "qwk.sensor_missing": missing_qwk,
-            "qwk.sensor_ablated": ablated_qwk,
-            "qwk.sensor_ablation_delta": present_qwk - ablated_qwk,
-        }
-        client = MlflowClient()
-        for name, value in extras.items():
-            client.log_metric(run.info.run_id, name, value)
-        metrics.update(extras)
         return {
             "evaluation_run_id": run.info.run_id,
             "metrics": metrics,
@@ -186,7 +167,10 @@ def infer_and_submit(
     with attempt(experiment_id) as run:
         test_ids = list(data["test_ids"])
         test_sample_ids = list(data["test_sample_ids"])
-        outputs = predict(exported["model_uri"], _arrays(data["store_path"], test_sample_ids))
+        outputs = predict(
+            exported["model_uri"],
+            collate_arrays(INPUTS, SignalStore(data["store_path"]), test_sample_ids),
+        )
         values = np.asarray(outputs["prediction"], dtype=np.int64).reshape(-1).tolist()
         if any(value not in range(4) for value in values):
             raise ValueError("CMI submission predictions must be integers in [0, 3]")

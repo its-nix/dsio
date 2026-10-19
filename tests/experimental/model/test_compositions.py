@@ -171,6 +171,17 @@ def test_an_unshaped_input_never_replaces_the_real_error() -> None:
     assert raised.value.__notes__ == ["in Stages stage 1 (Linear), input of type tuple"]
 
 
+def test_stages_routes_runtime_parameters_and_preserves_collision_checks() -> None:
+    linear = {
+        "reference": "torch.nn:Linear",
+        "parameters": {"in_features": 2, "out_features": 3},
+    }
+    stages = Stages(stages=[linear], stage_parameters={"0": {"bias": False}})
+    assert isinstance(stages[0], nn.Linear) and stages[0].bias is None
+    with pytest.raises(ValueError, match="collide with runtime arguments"):
+        Stages(stages=[linear], stage_parameters={"0": {"in_features": 2}})
+
+
 def test_inputs_are_cast_to_the_layers_dtype_and_slices_stay_plain() -> None:
     model = MLP(input_shape=[3], hidden=[4], output=2)
     assert model(torch.ones(2, 3, dtype=torch.float64)).dtype == torch.float32

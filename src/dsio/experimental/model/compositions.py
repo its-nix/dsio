@@ -120,6 +120,8 @@ class Stages(_Sequence):
 
     Parameters:
         ``stages``: a non-empty list of component configurations, built in order.
+        ``stage_parameters``: runtime-only parameters keyed by canonical string stage
+        index and supplied while resolving that stage.
 
     Devices:
         CPU and accelerators, as the stages allow.
@@ -139,10 +141,30 @@ class Stages(_Sequence):
         [[[0.0, 2.0], [0.0, 4.0]]]
     """
 
-    def __init__(self, stages: Sequence[Mapping[str, Any]]) -> None:
+    def __init__(
+        self,
+        stages: Sequence[Mapping[str, Any]],
+        stage_parameters: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
         if not stages:
             raise ValueError("stages must contain at least one component")
-        super().__init__(*(resolve_component(stage, expected=nn.Module) for stage in stages))
+        runtime = dict(stage_parameters or {})
+        expected_keys = {str(index) for index in range(len(stages))}
+        unknown = sorted(set(runtime) - expected_keys)
+        if unknown:
+            raise ValueError(f"stage_parameters contain unknown stage indices {unknown}")
+        if any(not isinstance(value, Mapping) for value in runtime.values()):
+            raise ValueError("stage_parameters values must be mappings")
+        super().__init__(
+            *(
+                resolve_component(
+                    stage,
+                    expected=nn.Module,
+                    **dict(runtime.get(str(index), {})),
+                )
+                for index, stage in enumerate(stages)
+            )
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         for index, stage in enumerate(self):

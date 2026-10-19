@@ -2,8 +2,110 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 from torch import Tensor, nn
+
+_ACTIVATIONS: dict[str, type[nn.Module]] = {"relu": nn.ReLU, "gelu": nn.GELU}
+
+
+class PooledConv1d(nn.Module):
+    """Apply a declared strided Conv1d stack and mean-pool over time.
+
+    Consumes:
+        A tensor ``[batch, channels, time]``.
+
+    Produces:
+        A tensor ``[batch, hidden]`` after the final activation and temporal mean.
+
+    Parameters:
+        ``channels``: input channels. ``hidden``: every convolution's output width
+        (default 32). ``depth``: number of convolution/activation pairs (default 2).
+        ``kernel_size``, ``stride``, and ``padding``: shared Conv1d parameters (defaults
+        9, 4, and 4). ``activation``: ``"relu"`` or ``"gelu"`` (default ``"gelu"``).
+
+    Devices:
+        CPU and accelerators. Inputs are cast to the convolution parameters' dtype.
+
+    Limitations:
+        Uniform width and convolution parameters across stages; no normalization,
+        residual, dilation, masked pooling, or learned projection.
+
+    Example:
+        >>> import torch
+        >>> tuple(PooledConv1d(channels=4)(torch.ones(2, 4, 32)).shape)
+        (2, 32)
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        hidden: int = 32,
+        depth: int = 2,
+        kernel_size: int = 9,
+        stride: int = 4,
+        padding: int = 4,
+        activation: str = "gelu",
+    ) -> None:
+        super().__init__()
+        self.channels = _positive("channels", channels)
+        hidden = _positive("hidden", hidden)
+        depth = _positive("depth", depth)
+        kernel_size = _positive("kernel_size", kernel_size)
+        stride = _positive("stride", stride)
+        if isinstance(padding, bool) or not isinstance(padding, int) or padding < 0:
+            raise ValueError("padding must be a non-negative integer")
+        if activation not in _ACTIVATIONS:
+            raise ValueError(
+                f"activation must be one of {sorted(_ACTIVATIONS)}, got {activation!r}"
+            )
+        layers: list[nn.Module] = []
+        inputs = self.channels
+        for _ in range(depth):
+            layers.extend(
+                (
+                    nn.Conv1d(
+                        inputs,
+                        hidden,
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                    ),
+                    _ACTIVATIONS[activation](),
+                )
+            )
+            inputs = hidden
+        self.body = nn.Sequential(*layers)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"channel-first signal must have rank 3, got shape {tuple(x.shape)}")
+        if x.shape[1] != self.channels:
+            raise ValueError(
+                f"channel axis 1 expected {self.channels}, got {x.shape[1]} in shape "
+                f"{tuple(x.shape)}"
+            )
+        if x.shape[2] < 1:
+            raise ValueError("time axis 2 must be non-empty")
+        time = x.shape[2]
+        stage = 0
+        for layer in self.body:
+            if not isinstance(layer, nn.Conv1d):
+                continue
+            kernel = layer.dilation[0] * (layer.kernel_size[0] - 1) + 1
+            padding = cast(int, layer.padding[0])
+            next_time = (time + 2 * padding - kernel) // layer.stride[0] + 1
+            if next_time < 1:
+                raise ValueError(
+                    f"time axis 2 extent {time} is too short for convolution stage {stage}"
+                )
+            time = next_time
+            stage += 1
+        dtype = next(self.parameters()).dtype
+        values = x if x.dtype == dtype else x.to(dtype)
+        result = self.body(values)
+        return result.mean(dim=2)
 
 
 class DenseConv1d(nn.Module):
@@ -125,4 +227,4 @@ def _positive(name: str, value: int) -> int:
     return value
 
 
-__all__ = ["DenseConv1d"]
+__all__ = ["DenseConv1d", "PooledConv1d"]
