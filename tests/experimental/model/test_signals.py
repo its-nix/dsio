@@ -218,25 +218,26 @@ def test_instance_standardization_uses_population_statistics_and_validity_channe
 
 
 @pytest.mark.parametrize("batch_size", [1, 2])
-def test_instance_standardization_matches_numpy_float32_reduction(batch_size: int) -> None:
+def test_instance_standardization_matches_float64_reference_within_float32_resolution(
+    batch_size: int,
+) -> None:
     rng = np.random.default_rng(0)
     signal = (
         rng.normal(size=(512, 3)) * np.array([0.01, 1.0, 100.0]) + np.array([1_000.0, 10.0, -50.0])
     ).astype(np.float32)
-    expected = (signal - signal.mean(axis=0, keepdims=True)) / np.maximum(
-        signal.std(axis=0, keepdims=True), 1e-6
-    )
+    reference = signal.astype(np.float64)
+    expected = (reference - reference.mean(axis=0)) / reference.std(axis=0)
     sample = torch.cat((torch.from_numpy(signal).T, torch.ones(1, len(signal))), dim=0)
     source = sample.unsqueeze(0).repeat(batch_size, 1, 1)
 
     actual = InstanceStandardize(observed_channel=3)(source)[:, :3].transpose(1, 2)
 
-    torch.testing.assert_close(
-        actual,
-        torch.from_numpy(expected).expand(batch_size, -1, -1),
-        rtol=1e-6,
-        atol=1e-6,
-    )
+    # float32 summation order differs between libraries and CPUs, so each channel may move by
+    # a few float32 steps at its own mean, measured in that channel's standard deviations.
+    step = np.spacing(np.abs(reference.mean(axis=0)).astype(np.float32)) / reference.std(axis=0)
+    tolerance = torch.from_numpy(32 * step + 1e-6)
+    error = (actual.double() - torch.from_numpy(expected)).abs()
+    assert torch.all(error <= tolerance)
 
 
 def test_instance_standardization_can_reproduce_numpy_float32_exactly() -> None:
