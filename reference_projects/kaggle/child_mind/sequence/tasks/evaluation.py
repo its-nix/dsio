@@ -15,14 +15,15 @@ from dsio.config.components import resolve_component
 from dsio.data.loading import DsioDataModule
 from dsio.data.store import SignalStore
 from dsio.eval.metrics import accuracy, quadratic_weighted_kappa
+from dsio.experimental.data import WindowItems
+from dsio.experimental.inference import MulticlassOutput
 from dsio.inference import build_predictor, log_predictor, require_checkpoint_lineage
 from dsio.tracking import attempt, load_split_evidence, record_provenance
 from dsio.train.artifacts import ArtifactRef
 from reference_projects.kaggle.child_mind.sequence.components import (
-    CmiSequencePrediction,
+    DATASET,
+    OUTPUT,
     ablate_sequence_sensor,
-    sequence_windows,
-    validate_sequence_prediction,
 )
 from reference_projects.kaggle.child_mind.sequence.data import (
     RAW_SENSOR_FEATURES,
@@ -46,10 +47,13 @@ def export(
         )
         model = resolve_component(components["model"], expected=torch.nn.Module)
         preprocessor = resolve_component(components["preprocessor"], expected=torch.nn.Module)
+        output = resolve_component(OUTPUT, expected=MulticlassOutput)
         store = SignalStore(data["store_path"])
         examples = sequence_examples(store, window_length=int(data["window_length"]))
         sample_id = next(iter(split["assignments"]["validate"]))
-        item = sequence_windows(store, examples, [sample_id])[0]
+        item = resolve_component(DATASET, fitted_sample_weights={}, expected=WindowItems)(
+            store, examples, [sample_id]
+        )[0]
         example = {"sample_id": [sample_id], "x": item["x"].unsqueeze(0)}
         identity = record_provenance(
             run.info.run_id,
@@ -61,23 +65,24 @@ def export(
             },
             components={
                 "builder": "dsio.inference.predictor:build_predictor",
+                "dataset_factory": DATASET,
                 "model": components["model"],
                 "preprocessor": components["preprocessor"],
-                "normalizer": (
-                    "reference_projects.kaggle.child_mind.sequence.components:CmiSequencePrediction"
-                ),
-                "validator": (
-                    "reference_projects.kaggle.child_mind.sequence.components:"
-                    "validate_sequence_prediction"
-                ),
+                "normalizer": OUTPUT,
+                "validator": {
+                    "reference": (
+                        "dsio.experimental.inference.outputs.multiclass:MulticlassValidator"
+                    ),
+                    "parameters": OUTPUT["parameters"],
+                },
             },
         )
         predictor = build_predictor(
             reference,
             model=model,
             preprocessor=preprocessor,
-            normalizer=CmiSequencePrediction(),
-            validator=validate_sequence_prediction,
+            normalizer=output,
+            validator=output.validator,
             input_example=example,
         )
         info = log_predictor(
@@ -116,7 +121,9 @@ def evaluate_model(
             manifest,
             fold=0,
             roles={"predict": "validate"},
-            dataset_factory=sequence_windows,
+            dataset_factory=resolve_component(
+                DATASET, fitted_sample_weights={}, expected=WindowItems
+            ),
             batch_size=int(execution["batch_size"]),
             num_workers=int(execution.get("num_workers", 0)),
             pin_memory=bool(execution.get("pin_memory", False)),
@@ -134,7 +141,7 @@ def evaluate_model(
         present: dict[str, bool] = {}
         for batch in data_module.predict_dataloader():
             identities = np.asarray(batch["sample_id"], dtype=np.str_)
-            participants = list(batch["participant_id"])
+            participants = list(batch["group"])
             x = batch["x"].numpy()
             output = predictor.predict({"sample_id": identities, "x": x})
             if not np.array_equal(output["sample_id"], identities):
@@ -161,7 +168,7 @@ def evaluate_model(
                 ablated_sum[participant] += ablated[index]
                 window_count[participant] = window_count.get(participant, 0) + 1
                 target[participant] = int(batch["y"][index])
-                present[participant] = bool(batch["sensor_present"][index])
+                present[participant] = bool(batch["x"][index, -1])
 
         participants = list(probability_sum)
         truth = np.asarray([target[value] for value in participants], dtype=np.int64)
@@ -206,10 +213,8 @@ def evaluate_model(
                 "participant_ids": participants,
             },
             components={
-                "prediction_schema": (
-                    "reference_projects.kaggle.child_mind.sequence.components:"
-                    "validate_sequence_prediction"
-                ),
+                "dataset_factory": DATASET,
+                "prediction_schema": OUTPUT,
                 "qwk": "dsio.eval.metrics:quadratic_weighted_kappa",
                 "ablation": (
                     "reference_projects.kaggle.child_mind.sequence.components:"

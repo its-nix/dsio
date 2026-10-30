@@ -13,7 +13,7 @@ Conventions every block follows: [conventions.md](conventions.md).
 
 #### `dsio.experimental.data.arrays:collate_arrays`
 
-Collate the given samples, in order, into NumPy arrays as training would batch them. — **experimental**; real uses: 7 (bike_sharing, digit_recognizer, essay_scoring, parkinsons_fog, rogii, store_sales, titanic).
+Collate the given samples, in order, into NumPy arrays as training would batch them. — **experimental**; real uses: 8 (bike_sharing, child_mind, digit_recognizer, essay_scoring, parkinsons_fog, rogii, store_sales, titanic).
 
 **Consumes**: A dataset factory called as `(store, examples, sample_ids)`, or its component
 configuration (e.g. a `StoredItems` config, the same one training records), the
@@ -64,29 +64,121 @@ and arrays from tensors share their memory.
 - real: `reference_projects/kaggle/bike_sharing` (test `tests/kaggle_portfolio/test_bike_sharing.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/60/runs/6c37805abd37412f99859815517ce85d)
 - real: `reference_projects/kaggle/store_sales` (test `tests/kaggle_portfolio/test_store_sales.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/54/runs/6df24c8d13a14d5bb1b73459f5d2d22f)
 - real: `reference_projects/kaggle/digit_recognizer` (test `tests/kaggle_portfolio/test_digit_recognizer.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/53/runs/990bcbd49b1147d0a04ecf0af98459e9)
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
 - real: `reference_projects/kaggle/essay_scoring` (test `tests/kaggle_portfolio/test_essay_scoring.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/71a7cb3803674fb9986fda1928b597e6)
 - real: `reference_projects/kaggle/parkinsons_fog` (test `tests/kaggle_portfolio/test_parkinsons_fog.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a)
 - real: `reference_projects/kaggle/rogii` (test `tests/kaggle_portfolio/test_rogii.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/56/runs/69a9ad9f8c6948829f938654b6d8c9a1)
 - fixture: `reference_projects/supervised` (test `tests/reference_flows/test_supervised_flow.py`; runs —)
 - fixture: `reference_projects/self_supervised` (test `tests/reference_flows/test_self_supervised_flow.py`; runs —)
 
+#### `dsio.experimental.data.fitting:fit_class_weights`
+
+Fit inverse-frequency class weights on the manifest's training role. — **experimental**; real uses: 1 (child_mind).
+
+**Consumes**: Zero-based integral labels stored in a sample/entity attribute. Window assignments
+require their bound `SignalExamples` and count each owning entity once.
+
+**Produces**: Native-loss weights `N / (K * count)` with counts, governed and resolved
+identities, role, partition, and source policy suitable for fitted evidence.
+
+**Parameters**: `partition`; positive `classes`; non-empty `attribute`; optional window
+`examples` for entity-attribute resolution.
+
+**Devices**: CPU; fitted once before training.
+
+**Limitations**: Every declared class must occur in the training role. Labels must be zero-based.
+
+**Example**
+
+```python
+>>> from pathlib import Path
+>>> from tempfile import mkdtemp
+>>> from dsio.data.adapters import entity_examples
+>>> from dsio.data.splits import generate
+>>> path = Path(mkdtemp()) / "classes"
+>>> with SignalStore.builder(path, channels=1) as builder:
+...     for index in range(8):
+...         _ = builder.add(
+...             f"s{index}", np.zeros((1, 1)), group=f"g{index}",
+...             attrs={"label": index % 4},
+...         )
+>>> store = SignalStore(path)
+>>> manifest = generate(
+...     entity_examples(store), "group_shuffle", name="classes", seed=3,
+...     parameters={"test_size": 0.25},
+... )
+>>> fit_class_weights(
+...     store, manifest, partition=0, classes=4, attribute="label"
+... )["counts"]
+[2, 1, 2, 1]
+```
+
+**Evidence**:
+
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
+
+#### `dsio.experimental.data.fitting:fit_group_weights`
+
+Fit mean-one inverse-group-frequency weights on the training role. — **experimental**; real uses: 1 (child_mind).
+
+**Consumes**: Manifest-governed store samples, or a bound `SignalExamples` window index.
+
+**Produces**: Deterministic group counts, group weights, and identity-keyed sample weights using
+`N / (G * group_count)`; their mean over the training role is one.
+
+**Parameters**: `partition` and optional governed window `examples`.
+
+**Devices**: CPU; fitted once before training.
+
+**Limitations**: Window fits count every assignment and deliberately do not deduplicate entities.
+
+**Example**
+
+```python
+>>> from pathlib import Path
+>>> from tempfile import mkdtemp
+>>> from dsio.data.splits import generate
+>>> from dsio.data.views import WindowSpec, build_index
+>>> path = Path(mkdtemp()) / "groups"
+>>> with SignalStore.builder(path, channels=1) as builder:
+...     _ = builder.add("a", np.zeros((6, 1)), group="a")
+...     _ = builder.add("b", np.zeros((4, 1)), group="b")
+>>> store = SignalStore(path)
+>>> examples = SignalExamples(store, build_index(store, WindowSpec(length=2, stride=2)))
+>>> manifest = generate(
+...     examples, "group_shuffle", name="groups", seed=3,
+...     parameters={"test_size": 0.5},
+... )
+>>> fit_group_weights(store, manifest, partition=0, examples=examples)["group_weights"]
+{'a': 1.0}
+```
+
+**Evidence**:
+
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
+
 #### `dsio.experimental.data.fitting:fit_standardization`
 
-Fit per-feature mean and scale over the samples assigned to training. — **experimental**; real uses: 1 (bike_sharing).
+Fit per-feature mean and scale over the samples assigned to training. — **experimental**; real uses: 2 (bike_sharing, child_mind).
 
 **Consumes**: A `SignalStore` of `[rows, features]` samples and the replayed split manifest.
 
-**Produces**: `{"mean", "scale", "role", "partition", "sample_ids", "observed"}`: float64
-statistics over every row of the training samples (`scale` is the population standard
-deviation, with zero-variance features mapped to 1) and the exact identities used.
+**Produces**: Float64 `mean`/`scale`, the governed role/partition/window identities, and,
+for selected sources, resolved entity identities plus the complete selection policy.
+Scale is the population standard deviation with configured tiny scales mapped to 1.
 
-**Parameters**: `partition`: split partition index; `observed` (default `false`): ignore NaN
-values per feature instead of propagating them.
+**Parameters**: `partition`: split partition index; `observed`: omit NaNs; `value_columns` and
+`observed_columns`: paired feature/mask selection; `examples` and `attribute`:
+resolve window assignments to unique entity attributes; `feature_names`: names for
+missing-feature errors; `minimum_scale`: exclusive tiny-scale threshold;
+`reduction`: NumPy-style centered or sum-of-squares population variance.
 
 **Devices**: CPU (NumPy); fitted once before training.
 
-**Limitations**: Loads the role's samples into memory together; a feature with no observed value
-raises rather than inventing statistics.
+**Limitations**: Loads the role's selected values into memory together. A feature with no observed
+value raises rather than inventing statistics. Explicit masks must be paired columns
+in the same stored matrix or entity attribute.
 
 **Example**
 
@@ -115,10 +207,12 @@ True
 **Evidence**:
 
 - real: `reference_projects/kaggle/bike_sharing` (test `tests/kaggle_portfolio/test_bike_sharing.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/60/runs/6c37805abd37412f99859815517ce85d)
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
 
 #### `dsio.experimental.data.fitting:record_fitted`
 
-Log fitted values as an MLflow evidence artifact and return its run-relative path. — **experimental**; real uses: 1 (bike_sharing).
+Log fitted values as an MLflow evidence artifact and return its run-relative path. — **experimental**; real uses: 2 (bike_sharing, child_mind).
 
 **Consumes**: An active MLflow run ID and a JSON-serializable fitted mapping, e.g. from
 :func:`fit_standardization`.
@@ -144,6 +238,8 @@ Log fitted values as an MLflow evidence artifact and return its run-relative pat
 **Evidence**:
 
 - real: `reference_projects/kaggle/bike_sharing` (test `tests/kaggle_portfolio/test_bike_sharing.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/60/runs/6c37805abd37412f99859815517ce85d)
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
 
 #### `dsio.experimental.data.items:StoredItems`
 
@@ -251,6 +347,52 @@ be declared. Padding is only along axis zero.
 - real: `reference_projects/kaggle/essay_scoring` (test `tests/kaggle_portfolio/test_essay_scoring.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/71a7cb3803674fb9986fda1928b597e6)
 - real: `reference_projects/kaggle/parkinsons_fog` (test `tests/kaggle_portfolio/test_parkinsons_fog.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a)
 - real: `reference_projects/kaggle/rogii` (test `tests/kaggle_portfolio/test_rogii.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/56/runs/69a9ad9f8c6948829f938654b6d8c9a1)
+
+#### `dsio.experimental.data.windows:WindowItems`
+
+Map governed windows into configured identity-bearing training items. — **experimental**; real uses: 1 (child_mind).
+
+**Consumes**: A `SignalStore`, `SignalExamples` over a bound `WindowIndex`, and governed
+window sample identities. Fields read window payloads, entity attributes, index
+labels or metrics. `x` may concatenate declared parts.
+
+**Produces**: CPU items containing `sample_id`, configured tensor fields and optional `group`.
+Fitted sample weights are identity-aligned; disjoint held-out assignments are neutral.
+
+**Parameters**: `x` is required; `y` and `mask` are optional field mappings. Sources are
+`window`, `entity_attribute`, `index_label` and `index_metric` and otherwise
+use `StoredItems` dtype/layout/transform/shape rules. `x` may instead declare a
+non-empty `parts` list, concatenated after flattening. `sample_weight` accepts
+`{"from": "fitted"}` with runtime `fitted_sample_weights`. `group` emits
+group identity.
+
+**Devices**: CPU. Lightning moves collated tensors to the accelerator.
+
+**Limitations**: Fixed-length windows only. Weight fitting is a separate training-role component.
+
+**Example**
+
+```python
+>>> from pathlib import Path
+>>> from tempfile import mkdtemp
+>>> import numpy as np
+>>> from dsio.data.adapters import SignalExamples
+>>> from dsio.data.store import SignalStore
+>>> from dsio.data.views import WindowSpec, build_index
+>>> path = Path(mkdtemp()) / "signals"
+>>> with SignalStore.builder(path, channels=1) as builder:
+...     _ = builder.add("a", np.arange(4, dtype=np.float32)[:, None], group="g")
+>>> store = SignalStore(path)
+>>> examples = SignalExamples(store, build_index(store, WindowSpec(length=2, stride=2)))
+>>> factory = WindowItems(x={"from": "window"}, group=True)
+>>> item = factory(store, examples, [examples.index.sample_id(0)])[0]
+>>> item["group"], item["x"].tolist()
+('g', [[0.0], [1.0]])
+```
+
+**Evidence**:
+
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
 
 ### `dsio.experimental.execution`
 
@@ -365,7 +507,7 @@ Validate shape, finiteness, range, and threshold consistency. — **experimental
 
 #### `dsio.experimental.inference.outputs.multiclass:MulticlassOutput`
 
-Argmax class labels, optionally with probabilities and an ordinal label offset. — **experimental**; real uses: 2 (digit_recognizer, essay_scoring).
+Argmax class labels, optionally with probabilities and an ordinal label offset. — **experimental**; real uses: 3 (child_mind, digit_recognizer, essay_scoring).
 
 **Consumes**: Finite logits `[batch, classes]`.
 
@@ -393,10 +535,12 @@ to indices; `score_field`: probability field (default `score`).
 
 - real: `reference_projects/kaggle/digit_recognizer` (test `tests/kaggle_portfolio/test_digit_recognizer.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/53/runs/990bcbd49b1147d0a04ecf0af98459e9)
 - real: `reference_projects/kaggle/essay_scoring` (test `tests/kaggle_portfolio/test_essay_scoring.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/e8277e41ca3a4957b1b74c968234383b, https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/71a7cb3803674fb9986fda1928b597e6)
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
 
 #### `dsio.experimental.inference.outputs.multiclass:MulticlassValidator`
 
-Validate class range, simplex, and argmax consistency. — **experimental**; real uses: 2 (digit_recognizer, essay_scoring).
+Validate class range, simplex, and argmax consistency. — **experimental**; real uses: 3 (child_mind, digit_recognizer, essay_scoring).
 
 **Consumes**: A MulticlassOutput result.
 
@@ -419,6 +563,8 @@ Validate class range, simplex, and argmax consistency. — **experimental**; rea
 
 - real: `reference_projects/kaggle/digit_recognizer` (test `tests/kaggle_portfolio/test_digit_recognizer.py`; via `dsio.experimental.inference.outputs.multiclass:MulticlassOutput`; runs https://pop.tailee691f.ts.net:8443/#/experiments/53/runs/990bcbd49b1147d0a04ecf0af98459e9)
 - real: `reference_projects/kaggle/essay_scoring` (test `tests/kaggle_portfolio/test_essay_scoring.py`; via `dsio.experimental.inference.outputs.multiclass:MulticlassOutput`; runs https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/e8277e41ca3a4957b1b74c968234383b, https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/71a7cb3803674fb9986fda1928b597e6)
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; via `dsio.experimental.inference.outputs.multiclass:MulticlassOutput`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; via `dsio.experimental.inference.outputs.multiclass:MulticlassOutput`; runs —)
 
 #### `dsio.experimental.inference.outputs.regression:RegressionOutput`
 
@@ -566,13 +712,15 @@ width; `hidden`: hidden widths (default none: a single linear layer);
 
 #### `dsio.experimental.model.compositions:Stages`
 
-Run configured components one after another. — **experimental**; real uses: 3 (bike_sharing, digit_recognizer, parkinsons_fog).
+Run configured components one after another. — **experimental**; real uses: 4 (bike_sharing, child_mind, digit_recognizer, parkinsons_fog).
 
 **Consumes**: Whatever the first stage consumes.
 
 **Produces**: Whatever the last stage produces.
 
 **Parameters**: `stages`: a non-empty list of component configurations, built in order.
+`stage_parameters`: runtime-only parameters keyed by canonical string stage
+index and supplied while resolving that stage.
 
 **Devices**: CPU and accelerators, as the stages allow.
 
@@ -597,6 +745,8 @@ inside a stage carries a note naming that stage's position and class.
 - real: `reference_projects/kaggle/bike_sharing` (test `tests/kaggle_portfolio/test_bike_sharing.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/60/runs/6c37805abd37412f99859815517ce85d)
 - real: `reference_projects/kaggle/digit_recognizer` (test `tests/kaggle_portfolio/test_digit_recognizer.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/53/runs/990bcbd49b1147d0a04ecf0af98459e9)
 - real: `reference_projects/kaggle/parkinsons_fog` (test `tests/kaggle_portfolio/test_parkinsons_fog.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a)
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
 
 #### `dsio.experimental.model.convolution:DenseConv1d`
 
@@ -634,6 +784,87 @@ pooling, residual path, or causal padding.
 
 - real: `reference_projects/kaggle/parkinsons_fog` (test `tests/kaggle_portfolio/test_parkinsons_fog.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a)
 
+#### `dsio.experimental.model.convolution:PooledConv1d`
+
+Apply a declared strided Conv1d stack and mean-pool over time. — **experimental**; real uses: 1 (child_mind).
+
+**Consumes**: A tensor `[batch, channels, time]`.
+
+**Produces**: A tensor `[batch, hidden]` after the final activation and temporal mean.
+
+**Parameters**: `channels`: input channels. `hidden`: every convolution's output width
+(default 32). `depth`: number of convolution/activation pairs (default 2).
+`kernel_size`, `stride`, and `padding`: shared Conv1d parameters (defaults
+9, 4, and 4). `activation`: `"relu"` or `"gelu"` (default `"gelu"`).
+
+**Devices**: CPU and accelerators. Inputs are cast to the convolution parameters' dtype.
+
+**Limitations**: Uniform width and convolution parameters across stages; no normalization,
+residual, dilation, masked pooling, or learned projection.
+
+**Example**
+
+```python
+>>> import torch
+>>> tuple(PooledConv1d(channels=4)(torch.ones(2, 4, 32)).shape)
+(2, 32)
+```
+
+**Evidence**:
+
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
+
+#### `dsio.experimental.model.fusion:MultimodalFusion`
+
+Encode declared input slices, gate optional modalities, and run a fusion head. — **experimental**; real uses: 1 (child_mind).
+
+**Consumes**: One tensor `x` shaped `[batch, *input_shape]`. Modality and presence fields
+are positions in its flattened per-sample representation.
+
+**Produces**: The configured head's tensor output.
+
+**Parameters**: `input_shape`: exact non-batch shape (only `[F]` and `[1,F]` are supported).
+`allow_leading_singleton`: with `input_shape=[F]`, also accept the explicitly
+compatible `[B,1,F]` form (default false).
+`modalities`: identifier-keyed mappings with `slice=[start, stop]`, an
+`encoder` ComponentConfig, optional scalar `presence`, static `enabled`
+(default true), and `append_presence` (default false). Slices are disjoint and,
+with unique presence indices, cover the flattened input. `order`: every modality
+name exactly once, defining construction and concatenation order independently of
+mapping serialization. `head`: ComponentConfig consuming concatenated
+embeddings/presences. `encoder_parameters`: runtime-only parameters routed by
+modality name to nested encoder resolution.
+
+**Devices**: CPU and accelerators, as configured encoders and head support. Input selection
+preserves dtype/device; individual stages may cast explicitly.
+
+**Limitations**: Exactly one flat model input and rank-two encoder outputs. Domain placeholder
+validity belongs to ingestion/mapping. This block has no modality attention or
+stochastic modality dropout.
+
+**Example**
+
+```python
+>>> import torch
+>>> model = MultimodalFusion(
+...     input_shape=[3],
+...     order=["a", "b"],
+...     modalities={"a": {"slice": [0, 2], "encoder": {
+...         "reference": "torch.nn:Linear",
+...         "parameters": {"in_features": 2, "out_features": 2}}},
+...         "b": {"slice": [2, 3], "encoder": {"reference": "torch.nn:Identity"}}},
+...     head={"reference": "torch.nn:Linear",
+...           "parameters": {"in_features": 3, "out_features": 1}},
+... )
+>>> tuple(model(torch.ones(4, 3)).shape)
+(4, 1)
+```
+
+**Evidence**:
+
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
+
 #### `dsio.experimental.model.layout:ChannelFirstToTimeMajor`
 
 Transpose a channel-first signal into a public time-major output. — **experimental**; real uses: 1 (parkinsons_fog).
@@ -664,7 +895,7 @@ omitted for variable-length padded batches.
 
 #### `dsio.experimental.model.layout:TimeMajorToChannelFirst`
 
-Transpose a time-major signal into the layout expected by PyTorch Conv1d. — **experimental**; real uses: 1 (parkinsons_fog).
+Transpose a time-major signal into the layout expected by PyTorch Conv1d. — **experimental**; real uses: 2 (child_mind, parkinsons_fog).
 
 **Consumes**: A rank-three tensor `[batch, time, channels]`.
 
@@ -691,6 +922,7 @@ omitted for variable-length padded batches.
 - real: `reference_projects/kaggle/parkinsons_fog` (test `tests/kaggle_portfolio/test_parkinsons_fog.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a)
 - fixture: `reference_projects/supervised` (test `tests/reference_flows/test_supervised_flow.py`; runs —)
 - fixture: `reference_projects/self_supervised` (test `tests/reference_flows/test_self_supervised_flow.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
 
 #### `dsio.experimental.model.masked_objective:MaskedObjective`
 
@@ -735,6 +967,37 @@ mask cannot omit more than the final output axis.
 - real: `reference_projects/kaggle/parkinsons_fog` (test `tests/kaggle_portfolio/test_parkinsons_fog.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a)
 - real: `reference_projects/kaggle/rogii` (test `tests/kaggle_portfolio/test_rogii.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/56/runs/69a9ad9f8c6948829f938654b6d8c9a1)
 
+#### `dsio.experimental.model.objectives:ClassIndexAccuracy`
+
+Compare argmax class indices with zero-based integer targets. — **experimental**; real uses: 1 (child_mind).
+
+**Consumes**: Floating logits `[batch, classes, ...]` and integer targets shaped like the
+logits without class axis 1.
+
+**Produces**: Mean accuracy when `reduction="mean"` or per-target float values when
+`reduction="none"`.
+
+**Parameters**: `reduction`: `"mean"` (default) or `"none"`. The latter composes with
+sample weighting in :class:`SupervisedObjective`.
+
+**Devices**: CPU and accelerators; the output shares the logits' device.
+
+**Limitations**: Hard zero-based class targets only; no top-k, ignore index, or multilabel mode.
+
+**Example**
+
+```python
+>>> import torch
+>>> metric = ClassIndexAccuracy()
+>>> metric(torch.tensor([[2., 1.], [0., 3.]]), torch.tensor([0, 1])).item()
+1.0
+```
+
+**Evidence**:
+
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
+
 #### `dsio.experimental.model.objectives:RootMeanSquaredError`
 
 Square root of the mean squared error, as an auxiliary metric. — **experimental**; real uses: 2 (rogii, store_sales).
@@ -765,7 +1028,7 @@ of that batch's mean, and epoch logging averages those roots.
 
 #### `dsio.experimental.model.objectives:SupervisedObjective`
 
-Compute a native loss between the model's prediction and a declared batch field. — **experimental**; real uses: 5 (bike_sharing, digit_recognizer, essay_scoring, store_sales, titanic).
+Compute a native loss between the model's prediction and a declared batch field. — **experimental**; real uses: 6 (bike_sharing, child_mind, digit_recognizer, essay_scoring, store_sales, titanic).
 
 **Consumes**: A batch with `x` (the model input), the target field, and, when
 `sample_weighted`, `sample_weight` shaped `[batch]` or `[batch, 1]`.
@@ -776,7 +1039,8 @@ Compute a native loss between the model's prediction and a declared batch field.
 **Parameters**: `loss`: component configuration of a native loss module (`torch.nn:MSELoss`,
 `torch.nn:CrossEntropyLoss`, ...). Its parameters are native; numeric `weight`
 and `pos_weight` become float32 tensors, and `reduction` (with the legacy
-`size_average`/`reduce`) is owned by the objective. `target`: the batch
+`size_average`/`reduce`) is owned by the objective. `loss_parameters`:
+runtime-only parameters supplied while resolving the loss. `target`: the batch
 field to predict (default `y`; `x` makes a reconstruction objective).
 `target_dtype`: optional cast (`float32`, `float64`, `int64`).
 `target_shape`: optional per-sample reshape, e.g. `[]` turns a `[batch, 1]`
@@ -816,6 +1080,8 @@ dense targets need a masked objective. Epoch values are logged per process.
 - real: `reference_projects/kaggle/digit_recognizer` (test `tests/kaggle_portfolio/test_digit_recognizer.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/53/runs/990bcbd49b1147d0a04ecf0af98459e9)
 - real: `reference_projects/kaggle/essay_scoring` (test `tests/kaggle_portfolio/test_essay_scoring.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/421f6f2834d64d11ba569bcbfd5e0a37, https://pop.tailee691f.ts.net:8443/#/experiments/55/runs/71a7cb3803674fb9986fda1928b597e6)
 - fixture: `reference_projects/supervised` (test `tests/reference_flows/test_supervised_flow.py`; runs —)
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
 
 #### `dsio.experimental.model.residual:BaselineResidual`
 
@@ -854,7 +1120,7 @@ identity around the declared baseline. Input and parameters must share a device.
 
 #### `dsio.experimental.model.standardization:InstanceStandardize`
 
-Standardize each sample and channel over its observed timesteps. — **experimental**; real uses: 1 (parkinsons_fog).
+Standardize each sample and channel over its observed timesteps. — **experimental**; real uses: 2 (child_mind, parkinsons_fog).
 
 **Consumes**: A floating tensor `[batch, channels, time]`. When `observed_channel` is set,
 that channel must contain zero-or-one validity; invalid value positions may be
@@ -863,21 +1129,27 @@ non-finite because they are selected out before arithmetic.
 **Produces**: `[batch, channels, time]` with per-instance, per-value-channel population mean
 zero and scale one where variance is non-zero. Invalid positions are exact zero;
 a declared validity channel is preserved for padding-aware downstream blocks.
+With `emit_observed`, derived finite-observation channels are appended, yielding
+`[batch, 2 * channels, time]`.
 
 **Parameters**: `eps`: finite positive minimum scale (default `1e-6`).
 `observed_channel`: optional channel-axis index containing shared timestep
 validity; negative indexes are accepted. With no channel, every timestep is used.
 `reduction`: `"torch"` keeps statistics native and compilable; `"numpy"`
 reproduces NumPy float32 reduction exactly for audited migrations.
+`nan_policy`: `"omit"` derives feature-specific observation from finite values;
+it is mutually exclusive with a shared validity channel. `emit_observed`:
+with `nan_policy="omit"`, append the derived observation channels after the
+normalized channels (default false).
 
 **Devices**: CPU and accelerators. Floating dtype/device are preserved; integer inputs become
 float32. The NumPy reduction copies through CPU and is intended only for explicit
 parity constraints.
 
-**Limitations**: Rank-three channel-first signals only. One validity channel is shared by every
-value channel; feature-specific missingness needs a different declared block. Half
-and bfloat16 statistics are accumulated in float32, then cast back. NumPy reduction
-is non-differentiable.
+**Limitations**: Rank-three channel-first signals only. Half and bfloat16 statistics are accumulated
+in float32, then cast back. NumPy reduction copies through CPU and is
+non-differentiable. Feature-specific omission treats every non-finite value as
+missing; use a validity channel when non-finite observed values must be rejected.
 
 **Example**
 
@@ -891,24 +1163,60 @@ is non-differentiable.
 **Evidence**:
 
 - real: `reference_projects/kaggle/parkinsons_fog` (test `tests/kaggle_portfolio/test_parkinsons_fog.py`; runs https://pop.tailee691f.ts.net:8443/#/experiments/57/runs/5dddb9d97cc04e6ca725a7dfaa03fb1a)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
+
+#### `dsio.experimental.model.standardization:PackedObservedStandardize`
+
+Standardize packed values under their equally sized observation mask. — **experimental**; real uses: 1 (child_mind).
+
+**Consumes**: A tensor `[batch, 2 * features]` ordered as `[values, observed]` on the last
+axis. Observation entries are finite zero or one.
+
+**Produces**: The same shape ordered as `[normalized_values, original_observed]`. Missing
+values are selected out before arithmetic and normalize to exact zero.
+
+**Parameters**: `mean` and `scale`: fitted finite per-feature values accepted by
+:class:`Standardize`.
+
+**Devices**: CPU and accelerators; statistics are float32 buffers and move with the module.
+
+**Limitations**: Rank-two input only. Values and masks must be equal contiguous halves of the last
+axis. For separate tensors, call `Standardize(observed_only=True)` directly.
+
+**Example**
+
+```python
+>>> import torch
+>>> stage = PackedObservedStandardize(mean=[1.0], scale=[2.0])
+>>> stage(torch.tensor([[3.0, 1.0]])).tolist()
+[[1.0, 1.0]]
+```
+
+**Evidence**:
+
+- real: `reference_projects/kaggle/child_mind` (test `tests/kaggle_portfolio/test_child_mind.py`; runs —)
+- real: `reference_projects/kaggle/child_mind/sequence` (test `tests/kaggle_portfolio/test_child_mind_sequence.py`; runs —)
 
 #### `dsio.experimental.model.standardization:Standardize`
 
 Subtract a fixed per-feature mean and divide by a fixed per-feature scale. — **experimental**; real uses: 2 (bike_sharing, digit_recognizer).
 
 **Consumes**: A tensor whose `axis` dimension holds the features; any other dimensions
-broadcast. A single-value `mean`/`scale` applies to every feature.
+broadcast. A single-value `mean`/`scale` applies to every feature. In
+`observed_only` mode, `forward` also consumes a same-shape zero-or-one mask.
 
 **Produces**: A tensor of the input's shape and the statistics' dtype (float32 unless the module
-is cast): `(x - mean) / scale`.
+is cast): `(x - mean) / scale`. Unobserved positions are exact zero.
 
 **Parameters**: `mean` and `scale`: equal-length sequences of finite numbers (`scale` must be
-non-zero); `axis`: the feature axis (default `-1`, the last).
+non-zero); `axis`: the feature axis (default `-1`); `observed_only`: require
+the explicit mask and positive scales.
 
 **Devices**: CPU and accelerators; the statistics are buffers that move with the module.
 
-**Limitations**: Exact division, no epsilon: fitters map zero-variance features to scale 1.
-Missing values (NaN) propagate.
+**Limitations**: Exact division, no epsilon: fitters map zero-variance features to scale 1. Missing
+values propagate in the compatible default mode; observed-only mode selects them
+out before arithmetic.
 
 **Example**
 
@@ -1346,15 +1654,9 @@ local on purpose.
 
 | Candidate | Uses | Consumers | Reason |
 |---|---|---|---|
-| Evaluation array builders | 1 | `reference_projects/kaggle/child_mind` | collate_arrays (#5) once its dataset is a warehouse block, Stories 9.1-9.4. |
 | Hash-bucket tokenizer | 1 | `reference_projects/kaggle/essay_scoring` | Stays local - one use; text preprocessing candidate. |
 | Labelled-example attribute filter | 8 | `reference_projects/kaggle/titanic`, `reference_projects/kaggle/bike_sharing`, `reference_projects/kaggle/digit_recognizer`, `reference_projects/kaggle/essay_scoring`, `reference_projects/kaggle/parkinsons_fog`, `reference_projects/kaggle/rogii`, `reference_projects/kaggle/store_sales`, `reference_projects/kaggle/child_mind` | Stays local - a one-line filter fails the depth test (cohort |
-| Local nn.Module models | 2 | `reference_projects/kaggle/child_mind`, `reference_projects/kaggle/child_mind/sequence` | Pooled temporal and multimodal models (#10, |
-| Local objectives | 2 | `reference_projects/kaggle/child_mind`, `reference_projects/kaggle/child_mind/sequence` | CMI moves to SupervisedObjective (#18) with its weighting stories (9.2-9.4). |
-| Prediction normalizers and validators | 2 | `reference_projects/kaggle/child_mind`, `reference_projects/kaggle/child_mind/sequence` | CMI moves to MulticlassOutput (#25) with its weighting stories (9.2-9.4). |
-| Streaming evaluation with participant aggregation | 1 | `reference_projects/kaggle/child_mind/sequence` | Stays local - bounded-memory streaming evaluation is on the roadmap. |
+| Streaming evaluation with participant aggregation, subgroup metrics, and modality ablation | 1 | `reference_projects/kaggle/child_mind/sequence` | Stays local - bounded-memory window-to-participant aggregation, subgroup metrics, and modality ablation are deferred with streaming evaluation on the roadmap. |
 | Train and export task wiring | 9 | `reference_projects/kaggle/titanic`, `reference_projects/kaggle/bike_sharing`, `reference_projects/kaggle/digit_recognizer`, `reference_projects/kaggle/essay_scoring`, `reference_projects/kaggle/parkinsons_fog`, `reference_projects/kaggle/rogii`, `reference_projects/kaggle/store_sales`, `reference_projects/kaggle/child_mind`, `reference_projects/kaggle/child_mind/sequence` | Fit and export spine functions (CAP-7), Epic 10. |
-| Train-fold statistics and weight fitting | 2 | `reference_projects/kaggle/child_mind`, `reference_projects/kaggle/child_mind/sequence` | Observed-only statistics and class/group weights (#4a-#4c), Stories 9.2, 9.3. |
 | Verified encoder handoff | 1 | `reference_projects/kaggle/digit_recognizer` | Loading a pretrained backbone only after its run, identity, digest and label-free lineage verify (#17) has one consumer, so it stays local; a DSio load-and-freeze path waits for pretrained weights (v2). |
 | Well feature engineering | 1 | `reference_projects/kaggle/rogii` | Stays local - domain feature mapping. |
-| Window Dataset class | 1 | `reference_projects/kaggle/child_mind/sequence` | Window dataset with weights and groups (#2), Story 9.1. |

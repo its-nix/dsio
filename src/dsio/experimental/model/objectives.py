@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from torch import Tensor, nn
@@ -54,7 +54,8 @@ class SupervisedObjective(nn.Module):
         ``loss``: component configuration of a native loss module (``torch.nn:MSELoss``,
         ``torch.nn:CrossEntropyLoss``, ...). Its parameters are native; numeric ``weight``
         and ``pos_weight`` become float32 tensors, and ``reduction`` (with the legacy
-        ``size_average``/``reduce``) is owned by the objective. ``target``: the batch
+        ``size_average``/``reduce``) is owned by the objective. ``loss_parameters``:
+        runtime-only parameters supplied while resolving the loss. ``target``: the batch
         field to predict (default ``y``; ``x`` makes a reconstruction objective).
         ``target_dtype``: optional cast (``float32``, ``float64``, ``int64``).
         ``target_shape``: optional per-sample reshape, e.g. ``[]`` turns a ``[batch, 1]``
@@ -95,6 +96,7 @@ class SupervisedObjective(nn.Module):
         metrics: Mapping[str, Mapping[str, Any]] | None = None,
         metric_stages: Sequence[str] | None = None,
         sample_weighted: bool = False,
+        loss_parameters: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(target, str) or not target:
@@ -112,7 +114,7 @@ class SupervisedObjective(nn.Module):
         self.target_shape = None if target_shape is None else _shape(target_shape)
         self.metric_stages = frozenset(stages)
         self.sample_weighted = sample_weighted
-        self.loss = _build("loss", loss, sample_weighted)
+        self.loss = _build("loss", loss, sample_weighted, runtime_parameters=loss_parameters)
         # Native class-index losses may divide by class-weight or non-ignored-target sums,
         # not batch size. Only opt into DsioModule's sample-count normalization when the
         # objective owns a mean-over-samples reduction or the native mean is independent
@@ -234,6 +236,68 @@ class RootMeanSquaredError(nn.Module):
         return torch.sqrt(F.mse_loss(prediction, target)) * self.scale
 
 
+class ClassIndexAccuracy(nn.Module):
+    """Compare argmax class indices with zero-based integer targets.
+
+    Consumes:
+        Floating logits ``[batch, classes, ...]`` and integer targets shaped like the
+        logits without class axis 1.
+
+    Produces:
+        Mean accuracy when ``reduction="mean"`` or per-target float values when
+        ``reduction="none"``.
+
+    Parameters:
+        ``reduction``: ``"mean"`` (default) or ``"none"``. The latter composes with
+        sample weighting in :class:`SupervisedObjective`.
+
+    Devices:
+        CPU and accelerators; the output shares the logits' device.
+
+    Limitations:
+        Hard zero-based class targets only; no top-k, ignore index, or multilabel mode.
+
+    Example:
+        >>> import torch
+        >>> metric = ClassIndexAccuracy()
+        >>> metric(torch.tensor([[2., 1.], [0., 3.]]), torch.tensor([0, 1])).item()
+        1.0
+    """
+
+    def __init__(self, reduction: Literal["mean", "none"] = "mean") -> None:
+        super().__init__()
+        if reduction not in {"mean", "none"}:
+            raise ValueError("reduction must be 'mean' or 'none'")
+        self.reduction = reduction
+
+    def forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        if prediction.ndim < 2 or prediction.shape[1] < 2:
+            raise ValueError("class-index accuracy needs logits [batch, classes, ...]")
+        if not prediction.is_floating_point():
+            raise ValueError("class-index accuracy needs floating logits")
+        if prediction.shape[0] == 0:
+            raise ValueError("class-index accuracy needs a non-empty batch")
+        expected = (prediction.shape[0], *prediction.shape[2:])
+        integer_dtypes = {
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        }
+        if tuple(target.shape) != expected or target.dtype not in integer_dtypes:
+            raise ValueError(
+                f"class-index accuracy needs integer targets {expected}, got "
+                f"{tuple(target.shape)} with dtype {target.dtype}"
+            )
+        if bool(((target < 0) | (target >= prediction.shape[1])).any()):
+            raise ValueError(
+                f"class-index targets must be in class range [0, {prediction.shape[1] - 1}]"
+            )
+        values = prediction.argmax(dim=1).eq(target).to(prediction.dtype)
+        return values.mean() if self.reduction == "mean" else values
+
+
 def _metric_configs(metrics: Mapping[str, Mapping[str, Any]] | None) -> dict[str, Any]:
     configs = dict(metrics or {})
     probe = nn.ModuleDict()
@@ -256,18 +320,34 @@ def _build(
     config: Mapping[str, Any],
     sample_weighted: bool,
     reduction: str | None = None,
+    runtime_parameters: Mapping[str, Any] | None = None,
 ) -> nn.Module:
     validated = validate_component_config(config)
     parameters = dict(validated["parameters"])
-    owned = sorted(set(parameters) & set(_OWNED_PARAMETERS))
+    supplied = dict(runtime_parameters or {})
+    owned = sorted((set(parameters) | set(supplied)) & set(_OWNED_PARAMETERS))
     if owned:
         raise ValueError(f"{role}: {owned} owned by the objective")
+    collisions = sorted(set(parameters) & set(supplied))
+    if collisions:
+        raise ComponentError(
+            f"{validated['reference']}: configured parameters {collisions} "
+            "collide with runtime arguments"
+        )
     runtime: dict[str, Any] = {
         name: torch.atleast_1d(torch.as_tensor(parameters.pop(name), dtype=torch.float32))
         for name in _TENSOR_PARAMETERS
         if isinstance(parameters.get(name), list | int | float)
         and not isinstance(parameters.get(name), bool)
     }
+    for name, value in supplied.items():
+        runtime[name] = (
+            torch.atleast_1d(torch.as_tensor(value, dtype=torch.float32))
+            if name in _TENSOR_PARAMETERS
+            and isinstance(value, list | int | float)
+            and not isinstance(value, bool)
+            else value
+        )
     if sample_weighted and reduction is not None:
         raise ValueError("an objective cannot request two owned reductions")
     if sample_weighted:
@@ -312,4 +392,4 @@ def _shape(shape: Sequence[int]) -> tuple[int, ...]:
     return tuple(shape)
 
 
-__all__ = ["RootMeanSquaredError", "SupervisedObjective"]
+__all__ = ["ClassIndexAccuracy", "RootMeanSquaredError", "SupervisedObjective"]

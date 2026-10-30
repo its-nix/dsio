@@ -32,7 +32,8 @@ from dsio.experimental.model.components import (
     vicreg_projector_head,
 )
 from dsio.experimental.model.compositions import MLP, Chain, Stages
-from dsio.experimental.model.convolution import DenseConv1d
+from dsio.experimental.model.convolution import DenseConv1d, PooledConv1d
+from dsio.experimental.model.fusion import MultimodalFusion
 from dsio.experimental.model.layout import ChannelFirstToTimeMajor, TimeMajorToChannelFirst
 from dsio.experimental.model.masked_objective import MaskedObjective
 from dsio.experimental.model.masking import (
@@ -42,9 +43,17 @@ from dsio.experimental.model.masking import (
     SpanMask,
     apply_mask,
 )
-from dsio.experimental.model.objectives import RootMeanSquaredError, SupervisedObjective
+from dsio.experimental.model.objectives import (
+    ClassIndexAccuracy,
+    RootMeanSquaredError,
+    SupervisedObjective,
+)
 from dsio.experimental.model.residual import BaselineResidual
-from dsio.experimental.model.standardization import InstanceStandardize, Standardize
+from dsio.experimental.model.standardization import (
+    InstanceStandardize,
+    PackedObservedStandardize,
+    Standardize,
+)
 from dsio.experimental.model.tokens import EmbeddingEncoder
 
 __all__ = [
@@ -53,6 +62,7 @@ __all__ = [
     "CausalMask",
     "Chain",
     "ChannelFirstToTimeMajor",
+    "ClassIndexAccuracy",
     "ComponentChain",
     "Conv1dEncoder",
     "CrossEntropy",
@@ -66,8 +76,11 @@ __all__ = [
     "MLP1d",
     "MaskedMSE",
     "MaskedObjective",
+    "MultimodalFusion",
     "NTXent",
+    "PackedObservedStandardize",
     "PatchMask",
+    "PooledConv1d",
     "RandomMask",
     "RandomScale",
     "RootMeanSquaredError",

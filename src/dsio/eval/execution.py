@@ -22,7 +22,7 @@ from mlflow.entities import (
     Run,
 )
 
-from dsio.eval.metrics import compute
+from dsio.eval.metrics import METRICS, compute
 from dsio.inference.loading import InferenceError, predict
 
 _LOGGED_MODEL_URI = re.compile(r"models:/(m-[0-9a-f]{32})")
@@ -55,13 +55,20 @@ def evaluate(
     score_field: str | None = None,
     mask: np.ndarray[Any, Any] | None = None,
     target_names: Sequence[str] | None = None,
+    subgroups: Mapping[str, np.ndarray[Any, Any]] | None = None,
+    subgroup_metrics: Mapping[str, str] | None = None,
+    ablations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, float]:
     """Compute and record evaluation evidence on one caller-owned attempt Run.
 
     ``mask`` selects scoreable positions before metrics run. With ``target_names``, the
     final target axis is scored independently and each metric returns one value per name
     plus its arithmetic mean. The mask then matches every target axis except that named
-    final axis. Without names it matches the complete target shape.
+    final axis. Without names it matches the complete target shape. ``subgroups`` are
+    independent row masks scored with alias-to-metric ``subgroup_metrics``. Each named
+    ``ablation`` selects one subgroup, copies and fills a declared last-axis input slice,
+    and reports the subgroup's full metric, ablated metric, and full-minus-ablated delta.
+    Row analyses intentionally do not combine with element masks or named target axes.
     """
     client = MlflowClient()
     evaluation_run = _attempt_run(client, run_id)
@@ -80,6 +87,16 @@ def evaluate(
         raise EvaluationError("evaluation targets must contain at least one row")
     resolved_target_names = _target_names(target_names, targets, names)
     resolved_mask = _mask(mask, targets, resolved_target_names)
+    resolved_subgroups, resolved_subgroup_metrics, resolved_ablations = _analyses(
+        inputs=inputs,
+        targets=targets,
+        subgroups=subgroups,
+        subgroup_metrics=subgroup_metrics,
+        ablations=ablations,
+        full_metric_names=names,
+        mask=resolved_mask,
+        target_names=resolved_target_names,
+    )
 
     try:
         outputs = predict(model_uri, inputs)
@@ -129,6 +146,19 @@ def evaluate(
     if any(not math.isfinite(value) for value in values.values()):
         raise EvaluationError("evaluation metrics must all be finite")
 
+    analysis_values, analysis_evidence = _analyze(
+        model_uri=model_uri,
+        inputs=inputs,
+        targets=targets,
+        outputs=outputs,
+        prediction_field=prediction_field,
+        score_field=score_field,
+        subgroups=resolved_subgroups,
+        subgroup_metrics=resolved_subgroup_metrics,
+        ablations=resolved_ablations,
+    )
+    values.update(analysis_values)
+
     _require_clean_attempt(client, _attempt_run(client, run_id))
     _model_evidence(client, model_uri)
     _dataset_evidence(client, dataset_run_id)
@@ -139,6 +169,7 @@ def evaluate(
             evidence = {
                 "target": targets,
                 **{f"prediction__{name}": value for name, value in outputs.items()},
+                **analysis_evidence,
             }
             if resolved_mask is not None:
                 evidence["mask"] = resolved_mask
@@ -162,6 +193,30 @@ def evaluate(
             client.log_param(run_id, "evaluation.target_names", json.dumps(resolved_target_names))
         if score_field is not None:
             client.log_param(run_id, "evaluation.score_field", score_field)
+        if resolved_subgroups:
+            identities = _input_identities(inputs, len(targets))
+            client.log_param(
+                run_id,
+                "evaluation.subgroups",
+                json.dumps(
+                    {
+                        name: identities[selected].tolist()
+                        for name, selected in sorted(resolved_subgroups.items())
+                    },
+                    sort_keys=True,
+                ),
+            )
+            client.log_param(
+                run_id,
+                "evaluation.subgroup_metrics",
+                json.dumps(resolved_subgroup_metrics, sort_keys=True),
+            )
+        if resolved_ablations:
+            client.log_param(
+                run_id,
+                "evaluation.ablations",
+                json.dumps(resolved_ablations, sort_keys=True),
+            )
         _attempt_run(client, run_id)
         _model_evidence(client, model_uri)
         _dataset_evidence(client, dataset_run_id)
@@ -187,6 +242,330 @@ def evaluate(
             f"could not persist native MLflow evaluation evidence: {error}"
         ) from error
     return values
+
+
+def _analyses(
+    *,
+    inputs: Mapping[str, Any],
+    targets: np.ndarray[Any, Any],
+    subgroups: Mapping[str, np.ndarray[Any, Any]] | None,
+    subgroup_metrics: Mapping[str, str] | None,
+    ablations: Mapping[str, Mapping[str, Any]] | None,
+    full_metric_names: tuple[str, ...],
+    mask: np.ndarray[Any, Any] | None,
+    target_names: tuple[str, ...] | None,
+) -> tuple[
+    dict[str, np.ndarray[Any, Any]],
+    dict[str, str],
+    dict[str, dict[str, Any]],
+]:
+    if subgroups is None and subgroup_metrics is None and ablations is None:
+        return {}, {}, {}
+    if mask is not None or target_names is not None:
+        raise EvaluationError(
+            "evaluation subgroups and ablations cannot be combined with mask or target_names"
+        )
+    if targets.ndim != 1:
+        raise EvaluationError("evaluation subgroups require one-dimensional row targets")
+    if not isinstance(subgroups, Mapping) or not subgroups:
+        raise EvaluationError("evaluation analyses require at least one subgroup")
+    if not isinstance(subgroup_metrics, Mapping) or not subgroup_metrics:
+        raise EvaluationError("evaluation analyses require subgroup_metrics")
+    resolved_subgroups: dict[str, np.ndarray[Any, Any]] = {}
+    for name, selected in subgroups.items():
+        _analysis_name(name, "subgroup")
+        if not isinstance(selected, np.ndarray) or selected.dtype.kind != "b":
+            raise EvaluationError(f"evaluation subgroup {name!r} must be a boolean NumPy array")
+        if selected.ndim != 1 or selected.shape != (len(targets),):
+            raise EvaluationError(
+                f"evaluation subgroup {name!r} must have shape ({len(targets)},), "
+                f"got {selected.shape}"
+            )
+        if not bool(selected.any()):
+            raise EvaluationError(f"evaluation subgroup {name!r} must select at least one row")
+        resolved_subgroups[name] = selected
+    resolved_metrics = _analysis_metrics(subgroup_metrics, "subgroup_metrics")
+    resolved_ablations: dict[str, dict[str, Any]] = {}
+    generated = set(full_metric_names)
+    for alias in resolved_metrics:
+        for subgroup in resolved_subgroups:
+            _generated_metric(generated, f"{alias}.{subgroup}")
+    if ablations is not None and not isinstance(ablations, Mapping):
+        raise EvaluationError("evaluation ablations must be a mapping")
+    for name, raw in (ablations or {}).items():
+        _analysis_name(name, "ablation")
+        if not isinstance(raw, Mapping):
+            raise EvaluationError(f"evaluation ablation {name!r} must be a mapping")
+        extra = sorted(set(raw) - {"input_field", "slice", "subgroup", "fill", "metrics"})
+        if extra:
+            raise EvaluationError(f"evaluation ablation {name!r} has unknown fields {extra}")
+        field = raw.get("input_field")
+        if not isinstance(field, str) or not field:
+            raise EvaluationError(f"evaluation ablation {name!r} input_field must name an input")
+        value = inputs.get(field)
+        if not isinstance(value, np.ndarray) or value.dtype.kind not in "iuf":
+            raise EvaluationError(
+                f"evaluation ablation {name!r} input {field!r} must be a numeric NumPy array"
+            )
+        if value.ndim < 2 or value.shape[0] != len(targets):
+            raise EvaluationError(
+                f"evaluation ablation {name!r} input {field!r} must have {len(targets)} "
+                "rows and a last feature axis"
+            )
+        bounds = raw.get("slice")
+        if (
+            not isinstance(bounds, Sequence)
+            or isinstance(bounds, str | bytes)
+            or len(bounds) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) for item in bounds)
+        ):
+            raise EvaluationError(f"evaluation ablation {name!r} slice must be [start, stop]")
+        start, stop = bounds
+        if start < 0 or stop <= start or stop > value.shape[-1]:
+            raise EvaluationError(
+                f"evaluation ablation {name!r} slice [{start}, {stop}] must be non-empty "
+                f"and within last-axis extent {value.shape[-1]}"
+            )
+        raw_subgroup = raw.get("subgroup")
+        if not isinstance(raw_subgroup, str) or raw_subgroup not in resolved_subgroups:
+            raise EvaluationError(
+                f"evaluation ablation {name!r} references unknown subgroup {raw_subgroup!r}"
+            )
+        fill = _fill_value(raw.get("fill", 0), value.dtype, name)
+        metrics = _analysis_metrics(raw.get("metrics"), f"ablation {name!r} metrics")
+        if set(metrics) - set(resolved_metrics):
+            raise EvaluationError(
+                f"evaluation ablation {name!r} metric aliases must also be subgroup_metrics"
+            )
+        if any(resolved_metrics[alias] != metric for alias, metric in metrics.items()):
+            raise EvaluationError(
+                f"evaluation ablation {name!r} metric aliases must resolve to the same "
+                "registered metric as subgroup_metrics"
+            )
+        for alias in metrics:
+            _generated_metric(generated, f"{alias}.{name}_ablated")
+            _generated_metric(generated, f"{alias}.{name}_ablation_delta")
+        resolved_ablations[name] = {
+            "input_field": field,
+            "slice": [start, stop],
+            "subgroup": raw_subgroup,
+            "fill": fill,
+            "metrics": metrics,
+        }
+    if len(generated) > _MLFLOW_MAX_METRICS_PER_BATCH:
+        raise EvaluationError(
+            f"evaluation analyses generate more than {_MLFLOW_MAX_METRICS_PER_BATCH} MLflow metrics"
+        )
+    identities = _input_identities(inputs, len(targets))
+    parameters = (
+        json.dumps(
+            {
+                name: identities[selected].tolist()
+                for name, selected in sorted(resolved_subgroups.items())
+            },
+            sort_keys=True,
+        ),
+        json.dumps(resolved_metrics, sort_keys=True),
+        json.dumps(resolved_ablations, sort_keys=True),
+    )
+    if any(len(value) > _MLFLOW_MAX_PARAM_VALUE_LENGTH for value in parameters):
+        raise EvaluationError(
+            f"evaluation analysis configuration exceeds MLflow's "
+            f"{_MLFLOW_MAX_PARAM_VALUE_LENGTH}-character parameter limit"
+        )
+    return resolved_subgroups, resolved_metrics, resolved_ablations
+
+
+def _analyze(
+    *,
+    model_uri: str,
+    inputs: Mapping[str, Any],
+    targets: np.ndarray[Any, Any],
+    outputs: Mapping[str, np.ndarray[Any, Any]],
+    prediction_field: str,
+    score_field: str | None,
+    subgroups: Mapping[str, np.ndarray[Any, Any]],
+    subgroup_metrics: Mapping[str, str],
+    ablations: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, float], dict[str, np.ndarray[Any, Any]]]:
+    if not subgroups:
+        return {}, {}
+    identities = _input_identities(inputs, len(targets))
+    _output_identities(outputs, identities, "full")
+    predicted = _output(outputs, prediction_field, "prediction")
+    score = None if score_field is None else _output(outputs, score_field, "score")
+    values: dict[str, float] = {}
+    evidence: dict[str, np.ndarray[Any, Any]] = {}
+    subgroup_values: dict[tuple[str, str], float] = {}
+    for subgroup, selected in subgroups.items():
+        evidence[f"subgroup__{subgroup}"] = selected
+        evidence[f"subgroup__{subgroup}__sample_id"] = identities[selected]
+        for alias, metric in subgroup_metrics.items():
+            value = _analysis_metric(
+                metric,
+                targets[selected],
+                predicted[selected],
+                None if score is None else score[selected],
+                score_field,
+            )
+            values[f"{alias}.{subgroup}"] = value
+            subgroup_values[(alias, subgroup)] = value
+    for name, declaration in ablations.items():
+        selected = subgroups[declaration["subgroup"]]
+        ablated_inputs = _selected_inputs(inputs, selected, len(targets))
+        field = declaration["input_field"]
+        changed = np.asarray(ablated_inputs[field]).copy()
+        start, stop = declaration["slice"]
+        changed[..., start:stop] = declaration["fill"]
+        ablated_inputs[field] = changed
+        try:
+            ablated_outputs = predict(model_uri, ablated_inputs)
+        except InferenceError as error:
+            raise EvaluationError(
+                f"ablation {name!r} prediction is incompatible: {error}"
+            ) from error
+        selected_identities = identities[selected]
+        _output_identities(ablated_outputs, selected_identities, f"ablation {name!r}")
+        ablated_prediction = _output(ablated_outputs, prediction_field, "prediction")
+        if ablated_prediction.shape != targets[selected].shape:
+            raise EvaluationError(
+                f"evaluation ablation {name!r} target shape {targets[selected].shape} does not "
+                f"match prediction shape {ablated_prediction.shape}"
+            )
+        ablated_score = (
+            None if score_field is None else _output(ablated_outputs, score_field, "score")
+        )
+        evidence[f"ablation__{name}__sample_id"] = selected_identities
+        for field_name, output_value in ablated_outputs.items():
+            evidence[f"ablation__{name}__prediction__{field_name}"] = output_value
+        for alias, metric in declaration["metrics"].items():
+            ablated_value = _analysis_metric(
+                metric,
+                targets[selected],
+                ablated_prediction,
+                ablated_score,
+                score_field,
+            )
+            values[f"{alias}.{name}_ablated"] = ablated_value
+            values[f"{alias}.{name}_ablation_delta"] = (
+                subgroup_values[(alias, declaration["subgroup"])] - ablated_value
+            )
+    if any(not math.isfinite(value) for value in values.values()):
+        raise EvaluationError("evaluation analysis metrics must all be finite")
+    return values, evidence
+
+
+def _analysis_name(name: object, role: str) -> None:
+    if not isinstance(name, str) or not _TARGET_NAME.fullmatch(name) or name == "mean":
+        raise EvaluationError(
+            f"evaluation {role} names must start with a letter, contain only letters, "
+            "numbers, underscores, or hyphens, and cannot use 'mean'"
+        )
+
+
+def _analysis_metrics(value: object, role: str) -> dict[str, str]:
+    if not isinstance(value, Mapping) or not value:
+        raise EvaluationError(f"evaluation {role} must be a non-empty alias-to-metric mapping")
+    result: dict[str, str] = {}
+    for alias, metric in value.items():
+        _analysis_name(alias, "metric alias")
+        if not isinstance(metric, str) or not metric:
+            raise EvaluationError(f"evaluation {role} metric names must be non-empty strings")
+        try:
+            METRICS.get(metric)
+        except Exception as error:
+            raise EvaluationError(
+                f"evaluation {role} contains unknown metric {metric!r}"
+            ) from error
+        result[alias] = metric
+    return result
+
+
+def _generated_metric(existing: set[str], name: str) -> None:
+    if len(name) > _MLFLOW_MAX_KEY_LENGTH:
+        raise EvaluationError(
+            f"evaluation analyses generate an MLflow metric name longer than "
+            f"{_MLFLOW_MAX_KEY_LENGTH} characters"
+        )
+    if name in existing:
+        raise EvaluationError(f"evaluation metric name {name!r} is generated more than once")
+    existing.add(name)
+
+
+def _fill_value(value: object, dtype: np.dtype[Any], ablation: str) -> int | float:
+    candidate = np.asarray(value)
+    if candidate.ndim != 0 or candidate.dtype.kind not in "iuf" or not bool(np.isfinite(candidate)):
+        raise EvaluationError(f"evaluation ablation {ablation!r} fill must be a finite scalar")
+    if not np.can_cast(candidate.dtype, dtype, casting="same_kind"):
+        raise EvaluationError(
+            f"evaluation ablation {ablation!r} fill cannot be represented by input dtype {dtype}"
+        )
+    if dtype.kind in "iu":
+        limits = np.iinfo(dtype)
+        numeric = candidate.item()
+        if numeric < limits.min or numeric > limits.max:
+            raise EvaluationError(
+                f"evaluation ablation {ablation!r} fill cannot be represented by input dtype "
+                f"{dtype}"
+            )
+    with np.errstate(over="ignore", invalid="ignore"):
+        converted = candidate.astype(dtype).item()
+    if not math.isfinite(float(converted)):
+        raise EvaluationError(
+            f"evaluation ablation {ablation!r} fill cannot be represented by input dtype {dtype}"
+        )
+    return converted
+
+
+def _input_identities(inputs: Mapping[str, Any], rows: int) -> np.ndarray[Any, Any]:
+    identities = inputs.get("sample_id")
+    if not isinstance(identities, np.ndarray) or identities.ndim != 1 or len(identities) != rows:
+        raise EvaluationError(
+            f"evaluation analyses require sample_id as a one-dimensional NumPy array "
+            f"with {rows} rows"
+        )
+    if identities.dtype.kind != "U" or len(set(identities.tolist())) != rows:
+        raise EvaluationError("evaluation analysis sample_id values must be unique strings")
+    return identities
+
+
+def _output_identities(
+    outputs: Mapping[str, Any], expected: np.ndarray[Any, Any], role: str
+) -> None:
+    identities = outputs.get("sample_id")
+    if not isinstance(identities, np.ndarray) or not np.array_equal(identities, expected):
+        raise EvaluationError(f"evaluation {role} prediction changed sample identity order")
+
+
+def _selected_inputs(
+    inputs: Mapping[str, Any], selected: np.ndarray[Any, Any], rows: int
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for name, value in inputs.items():
+        if isinstance(value, np.ndarray) and value.ndim > 0 and value.shape[0] == rows:
+            result[name] = value[selected]
+        else:
+            result[name] = value
+    return result
+
+
+def _analysis_metric(
+    metric: str,
+    targets: np.ndarray[Any, Any],
+    predicted: np.ndarray[Any, Any],
+    score: np.ndarray[Any, Any] | None,
+    score_field: str | None,
+) -> float:
+    _validate_metric_arrays(targets, predicted, score, score_field)
+    try:
+        value = compute((metric,), targets, predicted, score)[metric]
+    except Exception as error:
+        raise EvaluationError(
+            f"evaluation analysis metric {metric!r} is incompatible: {error}"
+        ) from error
+    if not math.isfinite(value):
+        raise EvaluationError(f"evaluation analysis metric {metric!r} must be finite")
+    return value
 
 
 def _attempt_run(client: MlflowClient, run_id: str) -> Run:

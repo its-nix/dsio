@@ -120,6 +120,10 @@ def test_dense_binary_violations_are_named() -> None:
 
 def test_multiclass_violations_are_named() -> None:
     validate = MulticlassOutput(classes=3, scores=True, label_offset=1).validator
+    with pytest.raises(PredictionViolation, match="non-empty"):
+        MulticlassOutput(classes=3)(torch.empty(0, 3))
+    with pytest.raises(PredictionViolation, match="non-empty"):
+        validate({"prediction": torch.empty(0, dtype=torch.int64), "score": torch.empty(0, 3)})
     score = torch.tensor([[0.7, 0.2, 0.1], [0.1, 0.1, 0.8]])
     ok = {"prediction": torch.tensor([1, 3]), "score": score}
     validate(ok)

@@ -8,10 +8,61 @@ from torch import nn
 from torch.nn import functional as F
 
 from dsio.config.components import ComponentError, resolve_component
-from dsio.experimental.model import MaskedObjective, RootMeanSquaredError, SupervisedObjective
+from dsio.experimental.model import (
+    ClassIndexAccuracy,
+    MaskedObjective,
+    RootMeanSquaredError,
+    SupervisedObjective,
+)
 
 MSE = {"reference": "torch.nn:MSELoss"}
 MAE = {"reference": "torch.nn:L1Loss"}
+
+
+def test_class_index_accuracy_supports_native_and_sample_weighted_reductions() -> None:
+    logits = torch.tensor([[3.0, 1.0], [2.0, 4.0], [5.0, 1.0]])
+    target = torch.tensor([0, 0, 1])
+    assert ClassIndexAccuracy()(logits, target).item() == pytest.approx(1 / 3)
+    assert ClassIndexAccuracy(reduction="none")(logits, target).tolist() == [1.0, 0.0, 0.0]
+    with pytest.raises(ValueError, match="reduction"):
+        ClassIndexAccuracy(reduction="sum")
+
+
+@pytest.mark.parametrize(
+    ("logits", "target", "message"),
+    [
+        (torch.ones(2, 3, dtype=torch.int64), torch.tensor([0, 1]), "floating logits"),
+        (torch.empty(0, 3), torch.empty(0, dtype=torch.int64), "non-empty"),
+        (torch.ones(2, 3), torch.tensor([True, False]), "integer targets"),
+        (torch.ones(2, 3), torch.tensor([0, 3]), "class range"),
+    ],
+)
+def test_class_index_accuracy_rejects_invalid_classification_contracts(
+    logits: torch.Tensor, target: torch.Tensor, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        ClassIndexAccuracy()(logits, target)
+
+
+def test_supervised_objective_routes_runtime_loss_parameters_with_collision_checks() -> None:
+    weights = [0.5, 2.0]
+    objective = SupervisedObjective(
+        loss={"reference": "torch.nn:CrossEntropyLoss"},
+        loss_parameters={"weight": weights},
+    )
+    logits, target = torch.tensor([[2.0, 1.0], [0.0, 3.0]]), torch.tensor([0, 1])
+    assert torch.equal(
+        objective(nn.Identity(), {"x": logits, "y": target}, "train")["loss"],
+        F.cross_entropy(logits, target, weight=torch.tensor(weights)),
+    )
+    with pytest.raises(ComponentError, match="collide with runtime arguments"):
+        SupervisedObjective(
+            loss={
+                "reference": "torch.nn:CrossEntropyLoss",
+                "parameters": {"weight": weights},
+            },
+            loss_parameters={"weight": weights},
+        )
 
 
 def test_losses_and_metrics_match_the_consumer_objectives_bit_for_bit() -> None:

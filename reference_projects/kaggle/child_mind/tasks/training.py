@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
 
 import mlflow
-import numpy as np
 import torch
 from lightning import seed_everything
 from lightning.pytorch.loggers import MLFlowLogger
@@ -16,7 +16,9 @@ from prefect import task
 from dsio.config.components import ComponentConfig, resolve_component
 from dsio.data.loading import DsioDataModule
 from dsio.data.store import SignalStore
-from dsio.experimental.data import StoredItems
+from dsio.experimental import data as experimental_data
+from dsio.experimental.data import fit_class_weights, record_fitted
+from dsio.experimental.model import SupervisedObjective
 from dsio.model.module import DsioModule
 from dsio.tracking import attempt, load_split_evidence, record_provenance
 from dsio.train.artifacts import save_artifact
@@ -29,8 +31,9 @@ from dsio.train.trainer import TrainerConfig, build_callbacks, build_trainer
 from reference_projects.kaggle.child_mind.components import (
     CLASSES,
     DATASET,
-    CmiFusionClassifier,
-    CmiObjective,
+    OBJECTIVE,
+    model_config,
+    model_runtime_parameters,
 )
 from reference_projects.kaggle.child_mind.data import (
     SENSOR_FEATURES,
@@ -79,21 +82,45 @@ def train(
         manifest = load_split_evidence(
             split["split_uri"], examples, consumer_run_id=run.info.run_id
         )
-        training_ids = list(manifest.fold(0).assignments["train"])
-        statistics = _statistics(store, training_ids)
-        weights = _class_weights(store, training_ids)
-        model_config: ComponentConfig = {
-            "reference": ("reference_projects.kaggle.child_mind.components:CmiFusionClassifier"),
-            "parameters": {
-                **statistics,
-                "use_sensor": mode == "fused",
-                "hidden": 32,
-            },
+        tabular = experimental_data.fit_standardization(
+            store,
+            manifest,
+            partition=0,
+            value_columns=range(TABULAR_VALUE_SLICE.start, TABULAR_VALUE_SLICE.stop),
+            observed_columns=range(TABULAR_MASK_SLICE.start, TABULAR_MASK_SLICE.stop),
+            feature_names=[f"tabular_{index}" for index in range(TABULAR_FEATURES)],
+            minimum_scale=1e-6,
+            reduction="sum_squares",
+        )
+        sensor = experimental_data.fit_standardization(
+            store,
+            manifest,
+            partition=0,
+            value_columns=range(SENSOR_VALUE_SLICE.start, SENSOR_VALUE_SLICE.stop),
+            observed_columns=range(SENSOR_MASK_SLICE.start, SENSOR_MASK_SLICE.stop),
+            feature_names=[f"sensor_{index}" for index in range(SENSOR_FEATURES)],
+            minimum_scale=1e-6,
+            reduction="sum_squares",
+        )
+        class_weights = fit_class_weights(store, manifest, CLASSES, "target", partition=0)
+        weights = class_weights["weights"]
+        tabular["artifact"] = record_fitted(run.info.run_id, "tabular-standardization", tabular)
+        sensor["artifact"] = record_fitted(run.info.run_id, "sensor-standardization", sensor)
+        fitted_evidence = {"tabular": tabular, "sensor": sensor}
+        class_weights["artifact"] = record_fitted(run.info.run_id, "class-weights", class_weights)
+        weight_evidence = {"class": class_weights}
+        statistics = {
+            "tabular_center": tabular["mean"],
+            "tabular_scale": tabular["scale"],
+            "sensor_center": sensor["mean"],
+            "sensor_scale": sensor["scale"],
         }
-        objective_config: ComponentConfig = {
-            "reference": "reference_projects.kaggle.child_mind.components:CmiObjective",
-            "parameters": {"class_weights": weights},
-        }
+        configured_model = model_config(use_sensor=mode == "fused", hidden=32)
+        runtime_model = model_runtime_parameters(**statistics)
+        recorded_model_config = deepcopy(configured_model)
+        recorded_model_config["parameters"].update(runtime_model)
+        recorded_objective_config = deepcopy(OBJECTIVE)
+        recorded_objective_config["parameters"]["loss_parameters"] = {"weight": weights}
         seed_everything(seed, workers=True, verbose=False)
         data_module = DsioDataModule(
             store,
@@ -101,7 +128,7 @@ def train(
             manifest,
             fold=0,
             roles=ROLES,
-            dataset_factory=resolve_component(DATASET, expected=StoredItems),
+            dataset_factory=resolve_component(DATASET, expected=experimental_data.StoredItems),
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
             seed=seed,
@@ -109,8 +136,12 @@ def train(
             drop_last=DROP_LAST,
         )
         module = DsioModule(
-            model=resolve_component(model_config, expected=CmiFusionClassifier),
-            objective=resolve_component(objective_config, expected=CmiObjective),
+            model=resolve_component(configured_model, **runtime_model, expected=torch.nn.Module),
+            objective=resolve_component(
+                OBJECTIVE,
+                loss_parameters={"weight": weights},
+                expected=SupervisedObjective,
+            ),
             optimizer_factory=torch.optim.AdamW,
             optimizer_parameters=OPTIMIZER_PARAMETERS,
         )
@@ -145,13 +176,15 @@ def train(
                 "drop_last": DROP_LAST,
                 "trainer": TRAINER.model_dump(mode="json"),
                 "execution": execution,
+                "standardization": fitted_evidence,
+                "weights": weight_evidence,
             },
             components={
                 "module": "dsio.model.module:DsioModule",
                 "data_module": "dsio.data.loading.module:DsioDataModule",
                 "dataset_factory": DATASET,
-                "model": model_config,
-                "objective": objective_config,
+                "model": recorded_model_config,
+                "objective": recorded_objective_config,
                 "optimizer": "torch.optim:AdamW",
                 "preprocessor": PREPROCESSOR,
             },
@@ -170,55 +203,7 @@ def train(
             "train_run_id": run.info.run_id,
             "checkpoint": reference.model_dump(mode="json"),
             "mode": mode,
+            "standardization": fitted_evidence,
+            "weights": weight_evidence,
             "identity": identity,
         }
-
-
-def _statistics(store: SignalStore, sample_ids: list[str]) -> dict[str, list[float]]:
-    tabular = _observed_statistics(
-        store, sample_ids, TABULAR_VALUE_SLICE, TABULAR_MASK_SLICE, TABULAR_FEATURES
-    )
-    sensor = _observed_statistics(
-        store, sample_ids, SENSOR_VALUE_SLICE, SENSOR_MASK_SLICE, SENSOR_FEATURES
-    )
-    return {
-        "tabular_center": tabular[0],
-        "tabular_scale": tabular[1],
-        "sensor_center": sensor[0],
-        "sensor_scale": sensor[1],
-    }
-
-
-def _observed_statistics(
-    store: SignalStore,
-    sample_ids: list[str],
-    value_slice: slice,
-    mask_slice: slice,
-    features: int,
-) -> tuple[list[float], list[float]]:
-    total = np.zeros(features, dtype=np.float64)
-    squares = np.zeros(features, dtype=np.float64)
-    count = np.zeros(features, dtype=np.int64)
-    for sample_id in sample_ids:
-        packed = np.asarray(store.read_sample(sample_id)["data"][0], dtype=np.float64)
-        values, mask = packed[value_slice], packed[mask_slice].astype(bool)
-        total[mask] += values[mask]
-        squares[mask] += np.square(values[mask])
-        count[mask] += 1
-    center = np.divide(total, count, out=np.zeros_like(total), where=count > 0)
-    variance = np.divide(squares, count, out=np.zeros_like(total), where=count > 0) - center**2
-    scale = np.sqrt(np.maximum(variance, 0.0))
-    scale[scale < 1e-6] = 1.0
-    return center.tolist(), scale.tolist()
-
-
-def _class_weights(store: SignalStore, sample_ids: list[str]) -> list[float]:
-    counts = np.zeros(CLASSES, dtype=np.int64)
-    for sample_id in sample_ids:
-        counts[int(store.read_sample(sample_id)["attrs"]["target"])] += 1
-    if bool((counts == 0).any()):
-        raise ValueError(
-            f"CMI training fold must contain all {CLASSES} classes; counts={counts.tolist()}"
-        )
-    weights = counts.sum() / (CLASSES * counts)
-    return weights.tolist()

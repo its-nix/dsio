@@ -128,7 +128,7 @@ NFR15: The full gate stays green on every story: `pytest`, `ruff check`, `ruff f
   - the export round-trip test.
 - The admission process (`docs/component-admission.md`) governs every new block. Each needs unit tests, an integration/property test, deterministic replay evidence, provenance assertions, one real downstream confirmation, limitations, an adversarial review, and explicit human approval of entry.
 - **Supersession:** the 2026-09-25 portfolio guardrails (consumers own model choice/loss; do not generalize collators yet) are superseded. The collator caution becomes the depth constraint on #3.
-- **Spine amendment:** an ADR defines "universal trainer" as a DSio-owned loop or task-dispatching entry point, and shows the CAP-7 functions are neither.
+- **Architecture record:** the accepted CAP-7 decision distinguishes a prohibited universal trainer—a DSio-owned loop or task-dispatching entry point—from the permitted fit/export spine functions. Before Story 10.1 adds production code, an ADR must record that accepted decision and amend the generic-spine specification.
 - **Brownfield:** there is no starter template. All work is in-place refactoring of `src/dsio/` and `reference_projects/`.
 - **Baseline:** Story 6.6 records the authoritative non-ingestion line baseline and golden metrics. `brownfield.md` gives the initial figures.
 - CUDA scale runs need a consumer-side CUDA torch override and a run-isolated `PREFECT_HOME`.
@@ -196,6 +196,15 @@ These apply to every story below. They are the per-story form of NFR1–NFR15 an
   - passes `require_admissible_component` with every consumer package name;
   - is reviewed adversarially before merge.
 - **Measured deletion.** Report the non-ingestion line delta and the syntax-tree check result (Story 6.6 tooling) in the PR.
+- **Large-story slicing.** A story spanning multiple consumers or independently reviewable
+  component families must declare its implementation slices before coding. Each slice must:
+  - deliver one coherent component-to-consumer vertical path;
+  - leave all repository gates green;
+  - record its own parity, evidence-register, and deletion delta;
+  - avoid exposing a partially supported stable API.
+
+  The parent story remains `in-progress` until every acceptance criterion and consumer
+  migration is complete. Slices are implementation checkpoints, not new requirement IDs.
 
 ## Epic 6: Trust and discover what DSio ships
 
@@ -779,7 +788,7 @@ So that my evaluation is configuration, not an 80-line task (cohort #29).
 
 **Given** consumer-supplied arrays, a subgroup definition (e.g. modality present or missing) and a declared modality slice to ablate
 **When** evaluation runs
-**Then** subgroup metrics and the ablated-minus-full delta are logged as native MLflow evidence, with ablated predictions persisted
+**Then** subgroup metrics and the full-minus-ablated delta are logged as native MLflow evidence, with ablated predictions persisted
 **And** `dsio.eval` still imports no pipeline layer
 
 **Given** child_mind
@@ -823,9 +832,10 @@ So that my task body is configuration plus one call (cohort #22).
 **Then** it calls native `Trainer.fit` once with the MLflow logger and capability logging, records provenance (including dataset and collator configurations), and stores the checkpoint as a digest-verified artifact whose reference it returns
 **And** it takes no task, mode or model-family argument, chooses no hyperparameter, and owns no loop, callback policy, flow, task or retry
 
-**Given** the spine's "universal trainer" non-goal
-**When** the function is merged
-**Then** an ADR defines a universal trainer as a DSio-owned loop or task-dispatching entry point, shows this function is neither, and amends the generic-spine spec and `CONTEXT.md` accordingly
+**Given** the accepted CAP-7 contract and the spine's "universal trainer" non-goal
+**When** Story 10.1 begins
+**Then** an ADR records the already accepted distinction and amends the generic-spine specification before production implementation is merged
+**And** the fit function is verified to own no loop, task dispatch, flow, task, retry, hyperparameter choice, or callback policy
 
 **Given** titanic and bike_sharing
 **When** their training tasks are migrated

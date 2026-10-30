@@ -710,3 +710,223 @@ def test_named_metric_failure_identifies_the_target(monkeypatch: pytest.MonkeyPa
         )
 
     assert client.list_artifacts(run_id, "evaluation") == []
+
+
+def test_subgroups_and_ablation_log_one_native_evidence_set_without_mutating_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dsio.eval.execution as execution
+
+    model_uri, _, dataset_run_id = _sources()
+    client = MlflowClient()
+    experiment_id = client.create_experiment("subgroup-ablation-evaluation")
+    run_id = _evaluation_attempt(client, experiment_id)
+    inputs = {
+        "sample_id": np.asarray(["a", "b", "c", "d"]),
+        "x": np.asarray(
+            [[1.0, 4.0, 5.0], [2.0, 6.0, 7.0], [3.0, 8.0, 9.0], [4.0, 10.0, 11.0]],
+            dtype=np.float32,
+        ),
+    }
+    original = {name: value.copy() for name, value in inputs.items()}
+    targets = np.asarray([0, 1, 2, 3])
+    calls: list[dict[str, np.ndarray[Any, Any]]] = []
+
+    def predict_once(_: str, values: Mapping[str, Any]) -> dict[str, np.ndarray[Any, Any]]:
+        captured = {name: np.asarray(value).copy() for name, value in values.items()}
+        calls.append(captured)
+        prediction = targets if len(calls) == 1 else np.asarray([1, 0])
+        return {"sample_id": captured["sample_id"], "prediction": prediction}
+
+    monkeypatch.setattr(execution, "predict", predict_once)
+    values = evaluate(
+        run_id=run_id,
+        model_uri=model_uri,
+        dataset_run_id=dataset_run_id,
+        inputs=inputs,
+        targets=targets,
+        metrics=("accuracy",),
+        subgroups={
+            "sensor_present": np.asarray([True, True, False, False]),
+            "sensor_missing": np.asarray([False, False, True, True]),
+        },
+        subgroup_metrics={"acc": "accuracy"},
+        ablations={
+            "sensor": {
+                "input_field": "x",
+                "slice": [1, 3],
+                "subgroup": "sensor_present",
+                "fill": 0.0,
+                "metrics": {"acc": "accuracy"},
+            }
+        },
+    )
+
+    assert values == {
+        "accuracy": 1.0,
+        "acc.sensor_present": 1.0,
+        "acc.sensor_missing": 1.0,
+        "acc.sensor_ablated": 0.0,
+        "acc.sensor_ablation_delta": 1.0,
+    }
+    assert len(calls) == 2
+    assert calls[1]["sample_id"].tolist() == ["a", "b"]
+    assert np.array_equal(calls[1]["x"][:, 0], inputs["x"][:2, 0])
+    assert np.equal(calls[1]["x"][:, 1:3], 0).all()
+    for name in inputs:
+        assert np.array_equal(inputs[name], original[name])
+
+    run = client.get_run(run_id)
+    assert run.data.metrics == values
+    assert json.loads(run.data.params["evaluation.subgroups"]) == {
+        "sensor_missing": ["c", "d"],
+        "sensor_present": ["a", "b"],
+    }
+    artifact = client.download_artifacts(run_id, "evaluation/predictions.npz", str(tmp_path))
+    with np.load(artifact) as evidence:
+        assert evidence["subgroup__sensor_present"].tolist() == [True, True, False, False]
+        assert evidence["subgroup__sensor_present__sample_id"].tolist() == ["a", "b"]
+        assert evidence["ablation__sensor__prediction__prediction"].tolist() == [1, 0]
+        assert evidence["ablation__sensor__sample_id"].tolist() == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"subgroups": {"present": np.asarray([1, 0])}}, "boolean NumPy"),
+        ({"subgroups": {"present": np.asarray([True])}}, "shape"),
+        ({"subgroups": {"present": np.asarray([False, False])}}, "at least one"),
+        ({"subgroups": {"bad.name": np.asarray([True, False])}}, "names must start"),
+        ({"mask": np.asarray([True, True])}, "cannot be combined"),
+        ({"ablation": {"slice": [True, 2]}}, "slice must be"),
+        ({"ablation": {"slice": [1, 4]}}, "last-axis extent"),
+        ({"ablation": {"subgroup": "missing"}}, "unknown subgroup"),
+        ({"ablation": {"input_field": "missing"}}, "numeric NumPy"),
+        ({"ablation": {"fill": float("nan")}}, "finite scalar"),
+        (
+            {"ablation": {"metrics": {"acc": "quadratic_weighted_kappa"}}},
+            "same registered metric",
+        ),
+        (
+            {
+                "inputs": {
+                    "sample_id": np.asarray([b"a", b"b"]),
+                    "x": np.asarray([[1.0], [2.0]], dtype=np.float32),
+                }
+            },
+            "unique strings",
+        ),
+        (
+            {
+                "inputs": {
+                    "sample_id": np.asarray(["a", "b"]),
+                    "x": np.asarray([[1], [2]], dtype=np.int8),
+                },
+                "ablation": {"fill": 128},
+            },
+            "cannot be represented",
+        ),
+    ],
+)
+def test_invalid_subgroup_and_ablation_configuration_fails_before_inference_or_writes(
+    change: dict[str, Any],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dsio.eval.execution as execution
+
+    model_uri, _, dataset_run_id = _sources()
+    client = MlflowClient()
+    experiment_id = client.create_experiment("invalid-subgroup-ablation")
+    run_id = _evaluation_attempt(client, experiment_id)
+    subgroups = {"present": np.asarray([True, False])}
+    ablation: dict[str, Any] = {
+        "input_field": "x",
+        "slice": [0, 1],
+        "subgroup": "present",
+        "fill": 0.0,
+        "metrics": {"acc": "accuracy"},
+    }
+    arguments: dict[str, Any] = {
+        "subgroups": subgroups,
+        "subgroup_metrics": {"acc": "accuracy"},
+        "ablations": {"sensor": ablation},
+    }
+    inputs = change.get("inputs", _inputs())
+    if "subgroups" in change:
+        arguments["subgroups"] = change["subgroups"]
+    elif "mask" in change:
+        arguments["mask"] = change["mask"]
+    if "ablation" in change:
+        ablation.update(change["ablation"])
+    monkeypatch.setattr(
+        execution,
+        "predict",
+        lambda *_: (_ for _ in ()).throw(AssertionError("inference ran before validation")),
+    )
+
+    with pytest.raises(EvaluationError, match=message):
+        evaluate(
+            run_id=run_id,
+            model_uri=model_uri,
+            dataset_run_id=dataset_run_id,
+            inputs=inputs,
+            targets=np.asarray([0, 1]),
+            metrics=("accuracy",),
+            **arguments,
+        )
+
+    run = client.get_run(run_id)
+    assert run.data.metrics == {}
+    assert run.inputs.dataset_inputs == []
+    assert run.inputs.model_inputs == []
+    assert client.list_artifacts(run_id, "evaluation") == []
+
+
+def test_ablation_identity_failure_leaves_no_evaluation_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dsio.eval.execution as execution
+
+    model_uri, _, dataset_run_id = _sources()
+    client = MlflowClient()
+    experiment_id = client.create_experiment("ablation-identity-failure")
+    run_id = _evaluation_attempt(client, experiment_id)
+    calls = 0
+
+    def wrong_identity(_: str, values: Mapping[str, Any]) -> dict[str, np.ndarray[Any, Any]]:
+        nonlocal calls
+        calls += 1
+        identities = np.asarray(values["sample_id"])
+        return {
+            "sample_id": identities if calls == 1 else identities[::-1],
+            "prediction": np.asarray([0, 1]),
+        }
+
+    monkeypatch.setattr(execution, "predict", wrong_identity)
+    with pytest.raises(EvaluationError, match="ablation 'sensor'.*identity order"):
+        evaluate(
+            run_id=run_id,
+            model_uri=model_uri,
+            dataset_run_id=dataset_run_id,
+            inputs=_inputs(),
+            targets=np.asarray([0, 1]),
+            metrics=("accuracy",),
+            subgroups={"present": np.asarray([True, True])},
+            subgroup_metrics={"acc": "accuracy"},
+            ablations={
+                "sensor": {
+                    "input_field": "x",
+                    "slice": [0, 1],
+                    "subgroup": "present",
+                    "metrics": {"acc": "accuracy"},
+                }
+            },
+        )
+
+    run = client.get_run(run_id)
+    assert run.data.metrics == {}
+    assert run.inputs.dataset_inputs == []
+    assert run.inputs.model_inputs == []
+    assert client.list_artifacts(run_id, "evaluation") == []
