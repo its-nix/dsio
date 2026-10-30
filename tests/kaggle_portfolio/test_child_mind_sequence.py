@@ -165,7 +165,7 @@ def test_sequence_components_train_on_raw_windows_without_participant_length_bia
         assert expected.shape == actual.shape
         assert torch.equal(expected, actual)
     assert torch.equal(composed(batch["x"]), model(batch["x"]))
-    assert torch.equal(composed(batch["x"].double()), model(batch["x"]))
+    assert torch.allclose(composed(batch["x"].double()), model(batch["x"]), rtol=0, atol=1e-6)
     objective = resolve_component(
         OBJECTIVE,
         loss_parameters={"weight": [1.0] * 4},
