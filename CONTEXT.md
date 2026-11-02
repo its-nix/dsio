@@ -38,6 +38,11 @@ _Avoid_: Dataset path
 A versioned, immutable declaration of named membership roles over one Dataset Identity.
 _Avoid_: Fold file, index list
 
+**View**:
+Examples taken over a store without copying it, such as windows of one length and stride. A Split
+Manifest over a store's entities replays on any View of that store.
+_Avoid_: Windowed copy, derived dataset
+
 **Partition**:
 One named set of role memberships from a Split Manifest consumed by an Experiment Node.
 _Avoid_: Fold

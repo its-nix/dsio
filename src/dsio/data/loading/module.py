@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Literal
 
+import numpy as np
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
+from dsio.data.adapters import SignalExamples
 from dsio.data.examples import Examples
 from dsio.data.loading.collation import Collate
 from dsio.data.loading.datasets import DatasetFactory, IdentityDataset, LoadingError
 from dsio.data.loading.loaders import build_loader, validate_loader_options
-from dsio.data.splits.models import SplitFile
+from dsio.data.splits.models import SplitFile, SplitFold
 from dsio.data.splits.validation import validate
+from dsio.data.splits.windows import resolve_window_masks, window_evidence
 from dsio.data.store import SignalStore
 
 Phase = Literal["train", "validate", "test", "predict"]
+SplitLevel = Literal["examples", "source"]
 _PHASES: tuple[Phase, ...] = ("train", "validate", "test", "predict")
 _STAGES: dict[str | None, tuple[Phase, ...]] = {
     None: _PHASES,
@@ -28,7 +33,15 @@ _STAGES: dict[str | None, tuple[Phase, ...]] = {
 
 
 class DsioDataModule(LightningDataModule):
-    """Replay one governed fold through deterministic, identity-preserving loaders."""
+    """Replay one governed fold through deterministic, identity-preserving loaders.
+
+    ``split_level`` says what the split assigns. ``"examples"`` means ``examples`` themselves.
+    ``"source"`` means the entities of the store a window view was taken from, so one split
+    can train on any view of that store without being regenerated. Nothing is inferred from
+    identity strings: the caller states it, and :attr:`window_evidence` then records what the
+    fold actually held. ``absent_groups`` names the groups a filtered view is expected to
+    have lost.
+    """
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         del kwargs
@@ -53,6 +66,8 @@ class DsioDataModule(LightningDataModule):
         shuffle: Mapping[str, bool] | None = None,
         drop_last: Mapping[str, bool] | None = None,
         collate_fn: Collate | None = None,
+        split_level: SplitLevel = "examples",
+        absent_groups: Collection[str] = (),
     ) -> None:
         super().__init__()
         self.store = store
@@ -71,6 +86,15 @@ class DsioDataModule(LightningDataModule):
         self.shuffle = _phase_flags("shuffle", shuffle, train_default=True)
         self.drop_last = _drop_last_flags(drop_last)
         self.collate_fn = collate_fn
+        if split_level not in ("examples", "source"):
+            raise LoadingError(f"split_level must be 'examples' or 'source', got {split_level!r}")
+        if split_level == "source":
+            _signal_view(examples)
+        elif absent_groups:
+            raise LoadingError("absent_groups requires split_level='source'")
+        self.split_level = split_level
+        self.absent_groups = absent_groups
+        self._window_evidence: dict[str, Any] | None = None
         self._loaders: dict[Phase, DataLoader[dict[str, Any]]] = {}
         validate_loader_options(
             batch_size=batch_size,
@@ -88,19 +112,20 @@ class DsioDataModule(LightningDataModule):
                 f"unsupported Lightning setup stage {stage!r}; expected fit, validate, "
                 "test, predict, or None"
             ) from None
-        validate(self.examples, self.split)
-        fold = self.split.fold(self.fold_index)
+        fold, assignments, evidence = self._assignments()
         self.drop_last = _drop_last_flags(self.drop_last)
+        # Window loaders and their evidence describe one resolution, so they appear together.
+        loaders = self._loaders if evidence is None else {}
         for phase in phases:
             if phase not in self.roles or phase in self._loaders:
                 continue
             role = self.roles[phase]
             try:
-                sample_ids = tuple(fold.assignments[role])
+                sample_ids = tuple(assignments[role])
             except KeyError:
                 raise LoadingError(
                     f"mapped role {role!r} is absent from split {self.split.name!r} "
-                    f"fold {fold.index}; available roles: {sorted(fold.assignments)}"
+                    f"fold {fold.index}; available roles: {sorted(assignments)}"
                 ) from None
             dataset = self._dataset(phase, sample_ids)
             if self.drop_last[phase] and len(dataset) < self.batch_size:
@@ -108,7 +133,7 @@ class DsioDataModule(LightningDataModule):
                     "drop_last would leave no full train batch: "
                     f"dataset has {len(dataset)} samples, batch_size is {self.batch_size}"
                 )
-            self._loaders[phase] = build_loader(
+            loaders[phase] = build_loader(
                 dataset,
                 batch_size=self.batch_size,
                 shuffle=self.shuffle[phase],
@@ -119,6 +144,18 @@ class DsioDataModule(LightningDataModule):
                 seed=self.seed,
                 collate_fn=self.collate_fn,
             )
+        if evidence is not None and loaders:
+            self._loaders.update(loaders)
+            self._window_evidence = evidence
+
+    @property
+    def window_evidence(self) -> dict[str, Any]:
+        """What the built loaders hold, for the Run's provenance config."""
+        if self.split_level != "source":
+            raise LoadingError("window_evidence requires split_level='source'")
+        if self._window_evidence is None:
+            raise LoadingError("window_evidence is available once setup() has built a loader")
+        return deepcopy(self._window_evidence)
 
     def train_dataloader(self) -> DataLoader[dict[str, Any]]:
         return self._loader("train")
@@ -131,6 +168,35 @@ class DsioDataModule(LightningDataModule):
 
     def predict_dataloader(self) -> DataLoader[dict[str, Any]]:
         return self._loader("predict")
+
+    def _assignments(
+        self,
+    ) -> tuple[SplitFold, Mapping[str, Sequence[str]], dict[str, Any] | None]:
+        if self.split_level == "examples":
+            validate(self.examples, self.split)
+            fold = self.split.fold(self.fold_index)
+            return fold, fold.assignments, None
+
+        view = _signal_view(self.examples)
+        if view.digest != self.store.identity:
+            raise LoadingError(
+                f"the view {view.name!r} was taken from a different store than "
+                f"{self.store.path.name!r}"
+            )
+        fold = self.split.fold(self.fold_index)
+        masks = resolve_window_masks(view, self.split, fold, absent_groups=self.absent_groups)
+        evidence = window_evidence(view, self.split, fold, masks)
+        if self._window_evidence is not None and evidence != self._window_evidence:
+            raise LoadingError(
+                "loaders were already built from different windows; use a new DsioDataModule "
+                "for another view or fold"
+            )
+        window_ids = np.asarray(view.sample_ids, dtype=str)
+        return (
+            fold,
+            {role: sorted(window_ids[mask].tolist()) for role, mask in masks.items()},
+            evidence,
+        )
 
     def _dataset(self, phase: Phase, sample_ids: tuple[str, ...]) -> IdentityDataset:
         try:
@@ -160,6 +226,14 @@ class DsioDataModule(LightningDataModule):
             raise LoadingError(
                 f"{phase} loader has not been set up; map the phase and call setup() first"
             ) from None
+
+
+def _signal_view(examples: Examples) -> SignalExamples:
+    if not isinstance(examples, SignalExamples):
+        raise LoadingError(
+            f"split_level='source' requires SignalExamples, got {type(examples).__name__}"
+        )
+    return examples
 
 
 def _phase_mapping(roles: Mapping[str, str]) -> dict[Phase, str]:

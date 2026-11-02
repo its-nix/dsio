@@ -240,6 +240,33 @@ batch = next(iter(data.train_dataloader()))
 assert set(batch) >= {"sample_id", "x"}
 ```
 
+A split generated over `entity_examples(store)` assigns recordings, so one committed split can
+train on any window view of that store, however it was filtered. Pass the view with
+`split_level="source"`, and record what the fold actually held:
+
+```python
+from dsio.data.adapters import SignalExamples
+from dsio.data.views import WindowSpec, build_index
+from dsio.experimental.data import WindowItems
+
+view = SignalExamples(store, build_index(store, WindowSpec(length=240, stride=120)))
+data = DsioDataModule(
+    store,
+    view,
+    manifest,
+    fold=0,
+    roles={"train": "train", "validate": "test"},
+    dataset_factory=WindowItems(x={"from": "window"}),
+    split_level="source",
+)
+data.setup("fit")
+windows_held = data.window_evidence
+```
+
+The split keeps its evidence over `entity_examples(store)`. A filter that loses a whole group is
+refused unless `absent_groups` names it, and the Run's provenance config should carry
+`window_evidence`, because two filters can otherwise share one split's evidence.
+
 `stored_samples` is the whole-sample decoder (legacy experimental until the Component
 Warehouse v1 field-mapping dataset replaces it). Windowed or task-labelled paths
 provide another ordinary dataset factory with the same `(store, examples, sample_ids)`
