@@ -77,6 +77,7 @@ SPINE_MODULES = frozenset(
         "dsio.data.splits.resolve",
         "dsio.data.splits.temporal",
         "dsio.data.splits.validation",
+        "dsio.data.splits.windows",
         "dsio.data.staging",
         "dsio.data.store",
         "dsio.data.store.builder",

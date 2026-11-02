@@ -11,11 +11,13 @@ import pytest
 import torch
 from torch.utils.data import Dataset, IterableDataset, default_collate
 
-from dsio.data.adapters import entity_examples
+from dsio.data.adapters import SignalExamples, entity_examples
 from dsio.data.loading import DsioDataModule, LoadingError, build_loader, collate_items
 from dsio.data.splits import generate
+from dsio.data.splits.models import SplitError
 from dsio.data.store import SignalStore
-from dsio.experimental.data import stored_samples
+from dsio.data.views import WindowSpec, build_index
+from dsio.experimental.data import WindowItems, stored_samples
 
 
 class _PicklableSamples(Dataset[dict[str, Any]]):
@@ -817,3 +819,207 @@ def test_split_is_validated_before_the_dataset_factory_runs(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="dataset digest|built for dataset"):
         module.setup("fit")
     assert called is False
+
+
+def _windowed(path: Path) -> tuple[SignalStore, SignalExamples, Any]:
+    with SignalStore.builder(path, channels=1, dtype="float32") as builder:
+        for index in range(12):
+            builder.add(
+                f"p{index // 2}_s{index % 2}",
+                np.full((8, 1), index, dtype=np.float32),
+                group=f"p{index // 2}",
+                attrs={"session": index % 2},
+            )
+    store = SignalStore(path)
+    view = SignalExamples(store, build_index(store, WindowSpec(length=4, stride=2)))
+    split = generate(
+        entity_examples(store),
+        "group_kfold",
+        name="people",
+        seed=3,
+        parameters={"n_splits": 3},
+    )
+    return store, view, split
+
+
+def _window_module(store: SignalStore, view: Any, split: Any, **options: Any) -> DsioDataModule:
+    arguments: dict[str, Any] = {
+        "fold": 0,
+        "roles": {"train": "train", "validate": "test", "test": "test", "predict": "test"},
+        "dataset_factory": WindowItems(x={"from": "window"}, group=True),
+        "batch_size": 4,
+        "split_level": "source",
+    }
+    return DsioDataModule(store, view, split, **(arguments | options))
+
+
+def test_a_source_level_split_trains_on_windows(tmp_path: Path) -> None:
+    store, view, split = _windowed(tmp_path / "cohort")
+    module = _window_module(store, view, split)
+
+    module.setup("fit")
+
+    fold = split.fold(0)
+    train = next(iter(module.train_dataloader()))
+    assert all(sample_id.count(":") == 2 for sample_id in train["sample_id"])
+    train_ids = set(_ids(module.train_dataloader()))
+    held_out = set(_ids(module.val_dataloader()))
+    assert train_ids.isdisjoint(held_out)
+    assert train_ids | held_out == set(view.sample_ids.tolist())
+    assert {sample_id.split("_")[0] for sample_id in train_ids} == set(fold.parts["train"])
+    assert {sample_id.split("_")[0] for sample_id in held_out} == set(fold.parts["test"])
+
+
+def test_a_source_level_split_works_on_filtered_views_and_predict(tmp_path: Path) -> None:
+    store, view, split = _windowed(tmp_path / "cohort")
+
+    for session in (0, 1):
+        filtered = view.subset(view.attribute("session") == session)
+        module = _window_module(store, filtered, split)
+        module.setup("predict")
+        ids = _ids(module.predict_dataloader())
+        assert ids
+        assert {sample_id.split(":")[0].split("_")[1] for sample_id in ids} == {f"s{session}"}
+        assert {sample_id.split("_")[0] for sample_id in ids} == set(split.fold(0).parts["test"])
+
+
+def test_window_evidence_describes_the_loaders_that_were_built(tmp_path: Path) -> None:
+    store, view, split = _windowed(tmp_path / "cohort")
+    module = _window_module(store, view, split)
+
+    with pytest.raises(LoadingError, match="setup"):
+        _ = module.window_evidence
+    module.setup("fit")
+
+    evidence = module.window_evidence
+    assert evidence["split_digest"] == split.digest
+    assert evidence["fold"] == 0
+    assert evidence["roles"]["train"]["windows"] == len(_ids(module.train_dataloader()))
+
+
+def test_repeating_setup_keeps_the_same_loaders(tmp_path: Path) -> None:
+    store, view, split = _windowed(tmp_path / "cohort")
+    module = _window_module(store, view, split)
+    module.setup("fit")
+    train = module.train_dataloader()
+
+    module.setup("fit")
+    module.setup("test")
+
+    assert module.train_dataloader() is train
+
+
+def test_setup_refuses_to_mix_loaders_from_two_resolutions(tmp_path: Path) -> None:
+    store, view, split = _windowed(tmp_path / "cohort")
+    module = _window_module(store, view, split)
+    module.setup("fit")
+
+    module.examples = view.subset(view.attribute("session") == 0)
+
+    with pytest.raises(LoadingError, match="already built"):
+        module.setup("test")
+
+
+def test_a_named_absent_group_reaches_the_resolver(tmp_path: Path) -> None:
+    store, view, split = _windowed(tmp_path / "cohort")
+    lost = sorted(split.fold(0).parts["train"])[0]
+    filtered = view.subset(view.groups != lost)
+
+    with pytest.raises(SplitError, match=lost):
+        _window_module(store, filtered, split).setup("fit")
+
+    module = _window_module(store, filtered, split, absent_groups=[lost])
+    module.setup("fit")
+    assert module.window_evidence["roles"]["train"]["absent_groups"] == [lost]
+
+
+def test_a_view_of_another_store_is_refused(tmp_path: Path) -> None:
+    _, view, split = _windowed(tmp_path / "cohort")
+    with SignalStore.builder(tmp_path / "other", channels=1, dtype="float32") as builder:
+        builder.add("only", np.ones((8, 1), dtype=np.float32), group="only")
+    other = SignalStore(tmp_path / "other")
+
+    with pytest.raises(LoadingError, match="different store"):
+        _window_module(other, view, split).setup("fit")
+
+
+def test_source_level_splits_need_a_signal_view(tmp_path: Path) -> None:
+    store, examples, split = _inputs(tmp_path / "samples")
+
+    with pytest.raises(LoadingError, match="SignalExamples"):
+        DsioDataModule(
+            store,
+            examples,
+            split,
+            fold=0,
+            roles={"train": "train"},
+            dataset_factory=stored_samples,
+            split_level="source",
+        )
+
+
+def test_split_level_is_closed(tmp_path: Path) -> None:
+    store, view, split = _windowed(tmp_path / "cohort")
+
+    with pytest.raises(LoadingError, match="split_level"):
+        _window_module(store, view, split, split_level="windows")
+
+
+def test_absent_groups_belong_to_source_level_splits(tmp_path: Path) -> None:
+    store, examples, split = _inputs(tmp_path / "samples")
+
+    with pytest.raises(LoadingError, match="absent_groups"):
+        DsioDataModule(
+            store,
+            examples,
+            split,
+            fold=0,
+            roles={"train": "train"},
+            dataset_factory=stored_samples,
+            absent_groups=["group-0"],
+        )
+
+
+def test_example_level_splits_have_no_window_evidence(tmp_path: Path) -> None:
+    store, examples, split = _inputs(tmp_path / "samples")
+    module = DsioDataModule(
+        store,
+        examples,
+        split,
+        fold=0,
+        roles={"train": "train"},
+        dataset_factory=stored_samples,
+        batch_size=2,
+    )
+    module.setup("fit")
+
+    with pytest.raises(LoadingError, match="split_level"):
+        _ = module.window_evidence
+    assert sorted(_ids(module.train_dataloader())) == sorted(split.fold(0).assignments["train"])
+
+
+def test_a_failed_source_level_setup_publishes_nothing_and_can_retry(tmp_path: Path) -> None:
+    store, view, split = _windowed(tmp_path / "cohort")
+    working = WindowItems(x={"from": "window"}, group=True)
+    calls: list[int] = []
+
+    def fails_on_the_second_loader(store: Any, examples: Any, sample_ids: Any) -> Any:
+        calls.append(len(sample_ids))
+        if len(calls) == 2:
+            raise ValueError("cannot read this role")
+        return working(store, examples, sample_ids)
+
+    module = _window_module(store, view, split, dataset_factory=fails_on_the_second_loader)
+
+    with pytest.raises(LoadingError, match="cannot read this role"):
+        module.setup("fit")
+
+    with pytest.raises(LoadingError, match="setup"):
+        _ = module.window_evidence
+    with pytest.raises(LoadingError, match="has not been set up"):
+        module.train_dataloader()
+
+    module.examples = view.subset(view.attribute("session") == 0)
+    module.setup("fit")
+    assert module.window_evidence["view_derivation"] == module.examples.derivation
+    assert _ids(module.train_dataloader())

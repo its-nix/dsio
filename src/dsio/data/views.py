@@ -330,6 +330,43 @@ def assert_index_matches_store(store: SignalStore, index: WindowIndex) -> None:
         )
 
 
+def assert_windows_within_entities(store: SignalStore, index: WindowIndex) -> None:
+    """Raise unless every window lies inside the entity it names, in that entity's group.
+
+    :func:`assert_index_matches_store` proves which store an index came from, not that each
+    window sits where it says. Disjoint groups only keep rows apart when a window really
+    belongs to its entity, so anything that trusts a window's owner to place it in a split
+    has to prove this first. Intervals are compared, so no row is materialised.
+    """
+    lows = np.empty(len(index.entity_names), dtype=np.int64)
+    highs = np.empty(len(index.entity_names), dtype=np.int64)
+    for code, (name, group) in enumerate(zip(index.entity_names, index.entity_groups, strict=True)):
+        try:
+            entity = store.entity(name)
+        except StoreError as error:
+            raise ViewError(f"index names unknown store entity {name!r}: {error}") from error
+        if entity.group != group:
+            raise ViewError(
+                f"index entity {name!r} has group {group!r}, but the store records {entity.group!r}"
+            )
+        lows[code] = entity.start_row
+        highs[code] = entity.end_row
+
+    starts = index.starts
+    length = index.spec.length
+    # `starts + length` would wrap at the top of int64, which the index's own bounds allow.
+    outside = np.flatnonzero(
+        (starts < lows[index.entity_codes]) | (starts > highs[index.entity_codes] - length)
+    )
+    if outside.size:
+        position = int(outside[0])
+        name = index.entity_names[int(index.entity_codes[position])]
+        raise ViewError(
+            f"{outside.size} window(s) lie outside the entity they name, first starting at "
+            f"{int(starts[position])} in {name!r}"
+        )
+
+
 def window_times(
     store: SignalStore, index: WindowIndex, *, unit: TimeUnit = "row"
 ) -> tuple[np.ndarray, np.ndarray]:

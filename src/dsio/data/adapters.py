@@ -163,9 +163,10 @@ class SignalExamples:
         """The corpus, not the view of it.
 
         A split names groups, and which groups exist is a property of the corpus rather than
-        of any window length taken over it. So a split generated before a view existed
-        resolves against every view of the same data, and re-indexing at a different window
-        length does not invalidate a committed split.
+        of any window length taken over it. So a split generated before a view existed still
+        binds to every view of the same data, and re-indexing at a different window length
+        does not invalidate a committed split. Its exact assignments name entities, so it
+        reaches windows through :func:`dsio.data.splits.windows.resolve_window_masks`.
 
         That is deliberate and it is the useful direction: splits outlive views. Binding to
         the view instead would force a window length to be chosen before the split, which is

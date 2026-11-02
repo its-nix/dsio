@@ -3,6 +3,16 @@
 Status: accepted (2026-08-17)
 Amends: ADR 0004, item 6, which recommended *Repeatable Splitting* by hash of a stable ID.
 
+Amended (2026-11-02): Exact assignments made a split generated over `entity_examples(store)`
+unusable against a window view, contradicting the promise that a split outlives its views:
+assignments name entities, a view's examples are windows, and `validate` compares exact
+identities. `validate` and `resolve_masks` stay exact. The new
+`dsio.data.splits.windows.resolve_window_masks` runs that same gate on the entities of the
+store a `SignalExamples` is bound to, built by DSIO rather than supplied by the caller, then
+gives each window the role of the entity that owns it. `DsioDataModule` opts in with
+`split_level="source"`. The manifest and its digest do not change, and no committed split names
+a window. See docs/superpowers/specs/2026-11-02-window-views-of-entity-splits.md.
+
 Amended (2026-09-22): The accepted generic spine reverses the 2026-08-20 decision to push
 generation into each project. Generation now lives at `dsio.data.splits.generate()` behind a
 closed DSIO-owned dispatcher. Established grouped algorithms delegate to the required,
