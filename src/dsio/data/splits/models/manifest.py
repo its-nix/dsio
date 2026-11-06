@@ -15,6 +15,7 @@ from dsio.data.splits.models.fold import SplitFold
 SCHEMA = "dsio.split/3"
 STABLE_ALGORITHMS = frozenset(
     {
+        "declared",
         "group_kfold",
         "group_shuffle",
         "leave_one_group_out",

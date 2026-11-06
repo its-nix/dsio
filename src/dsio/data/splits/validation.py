@@ -7,6 +7,8 @@ from collections import Counter
 import numpy as np
 
 from dsio.data.examples import Examples, ExamplesError, assert_consistent, check
+from dsio.data.splits.declared import ALGORITHM as DECLARED
+from dsio.data.splits.declared import declared_roles, normalize_parameters
 from dsio.data.splits.models import STABLE_ALGORITHMS, SplitError, SplitFile
 from dsio.data.splits.temporal import apply as apply_temporal
 
@@ -50,7 +52,14 @@ def validate(examples: Examples, manifest: SplitFile) -> None:
             f"split {manifest.name!r} does not declare the required validation set for "
             f"{manifest.algorithm!r}"
         )
-    if not temporal and "scikit-learn" not in manifest.dependencies:
+    declared = manifest.algorithm == DECLARED
+    if declared:
+        normalized = normalize_parameters(manifest.parameters, manifest.seed)
+        if normalized != manifest.parameters:
+            raise SplitError(f"split {manifest.name!r} declared parameters are not canonical")
+        if len(manifest.folds) != 1:
+            raise SplitError(f"split {manifest.name!r} declared splits have exactly one fold")
+    elif not temporal and "scikit-learn" not in manifest.dependencies:
         raise SplitError(f"split {manifest.name!r} has no scikit-learn dependency provenance")
 
     if manifest.store != source.name:
@@ -228,6 +237,18 @@ def validate(examples: Examples, manifest: SplitFile) -> None:
                     f"split {manifest.name!r} fold {fold.index} discarded count is "
                     f"{fold.counts['discarded']}, expected {discarded}"
                 )
+
+        if declared:
+            values = declared_roles(
+                source, manifest.parameters["attribute"], manifest.required_roles
+            )
+            for role in manifest.required_roles:
+                expected = {sample_ids[index] for index in np.flatnonzero(values == role)}
+                if set(fold.assignments[role]) != expected:
+                    raise SplitError(
+                        f"split {manifest.name!r} fold {fold.index} role {role!r} "
+                        "assignments disagree with the declared attribute"
+                    )
 
         evaluation_role = manifest.required_roles[1]
         for sample_id in fold.assignments[evaluation_role]:
