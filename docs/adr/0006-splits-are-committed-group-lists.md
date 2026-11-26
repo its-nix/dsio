@@ -3,6 +3,14 @@
 Status: accepted (2026-08-17)
 Amends: ADR 0004, item 6, which recommended *Repeatable Splitting* by hash of a stable ID.
 
+Amended (2026-11-06): A corpus that publishes its own train/test division cannot be reproduced by
+computing a split, and `validate` refuses hand-written manifests. The closed dispatcher gains
+`declared`: roles are read from a named per-example attribute, seed must be 0, and the source
+citation, URL and archive digest are required parameters inside the manifest digest. `validate`
+repeats the derivation, so a manifest whose assignments drift from the attribute is refused.
+Group disjointness still applies; a within-group published split needs a finer group key, stated
+by the consumer. See docs/superpowers/specs/2026-11-06-declared-splits.md.
+
 Amended (2026-11-02): Exact assignments made a split generated over `entity_examples(store)`
 unusable against a window view, contradicting the promise that a split outlives its views:
 assignments name entities, a view's examples are windows, and `validate` compares exact

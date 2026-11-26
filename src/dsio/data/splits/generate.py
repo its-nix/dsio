@@ -15,6 +15,7 @@ from sklearn.model_selection import (
 )
 
 from dsio.data.examples import Examples, ExamplesError, assert_consistent, check
+from dsio.data.splits.declared import declared_roles, normalize_parameters
 from dsio.data.splits.models import STABLE_ALGORITHMS, SplitError, SplitFile, SplitFold
 from dsio.data.splits.temporal import TemporalBounds, TemporalSpec, apply, walk_forward
 from dsio.data.splits.validation import validate
@@ -71,6 +72,16 @@ def generate(
             "temporal_purge_embargo",
             "partial_coverage",
         )
+    elif algorithm == "declared":
+        folds, normalized = _declared_folds(source, seed, roles, params)
+        dependencies = {}
+        coverage = "total"
+        validations = (
+            "identity_membership",
+            "role_disjointness",
+            "group_disjointness",
+            "total_coverage",
+        )
     else:
         folds, normalized = _grouped_folds(source, algorithm, seed, roles, params)
         dependencies = {"scikit-learn": version("scikit-learn")}
@@ -113,6 +124,36 @@ def _ordered_source(examples: Examples) -> tuple[np.ndarray, np.ndarray, np.ndar
     sample_ids = np.asarray(examples.sample_ids, dtype=str)
     order = np.argsort(sample_ids, kind="stable")
     return sample_ids[order], np.asarray(examples.groups, dtype=str)[order], order
+
+
+def _declared_folds(
+    examples: Examples,
+    seed: int,
+    roles: tuple[str, str],
+    parameters: dict[str, Any],
+) -> tuple[list[SplitFold], dict[str, Any]]:
+    normalized = normalize_parameters(parameters, seed)
+    sample_ids, groups, order = _ordered_source(examples)
+    values = declared_roles(examples, normalized["attribute"], roles)[order]
+    train_role, test_role = roles
+    straddling = sorted(
+        set(groups[values == train_role].tolist()) & set(groups[values == test_role].tolist())
+    )
+    if straddling:
+        raise SplitError(
+            f"declared split {examples.name!r} leaks group {straddling[0]!r} across roles "
+            f"{train_role!r} and {test_role!r}"
+        )
+    fold = _fold_from_positions(
+        0,
+        sample_ids,
+        groups,
+        np.flatnonzero(values == train_role),
+        np.flatnonzero(values == test_role),
+        train_role,
+        test_role,
+    )
+    return [fold], normalized
 
 
 def _grouped_folds(

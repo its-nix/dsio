@@ -214,6 +214,11 @@ manifest = load_split_evidence(
 MLflow remains the record: the source Run owns the manifest artifact and native dataset input;
 the consumer links that same dataset plus the immutable artifact URI without copying either.
 
+A corpus that ships its own train/test division is replayed, not recomputed, with
+`algorithm="declared"`: roles come from a per-example attribute, `seed` is 0, and
+`parameters["source"]` records the citation, URL and SHA-256 of the file the roles came from.
+`validate` re-derives the roles on every replay.
+
 Supported names are owned by DSIO; projects cannot register splitters at runtime. Novel
 algorithms enter through DSIO's reviewed
 [component-admission path](https://github.com/Lior-Nis/dsio/blob/main/docs/component-admission.md).

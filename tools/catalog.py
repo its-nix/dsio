@@ -69,6 +69,7 @@ SPINE_MODULES = frozenset(
         "dsio.data.loading.module",
         "dsio.data.readers",
         "dsio.data.splits",
+        "dsio.data.splits.declared",
         "dsio.data.splits.folds",
         "dsio.data.splits.generate",
         "dsio.data.splits.models",

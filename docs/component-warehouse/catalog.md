@@ -1626,6 +1626,7 @@ Composition roots, data infrastructure and evidence machinery every block plugs 
 
 | Entry | Kind |
 |---|---|
+| `dsio.data.splits:generate[declared]` | Split algorithm (closed dispatcher). |
 | `dsio.data.splits:generate[group_kfold]` | Split algorithm (closed dispatcher). |
 | `dsio.data.splits:generate[group_shuffle]` | Split algorithm (closed dispatcher). |
 | `dsio.data.splits:generate[leave_one_group_out]` | Split algorithm (closed dispatcher). |
